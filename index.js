@@ -18,6 +18,16 @@
 //  (GUILD_ID removido — bot global em todos os servidores)
 //
 // ============================================================
+const http = require('http');
+
+// Cria o servidor web que o Render exige para manter o bot vivo
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Bot Agent XT Online!');
+}).listen(process.env.PORT || 3000, () => {
+  console.log("🌐 Servidor web de monitorização iniciado!");
+});
+
 
 'use strict';
 
