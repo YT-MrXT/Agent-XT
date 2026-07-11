@@ -659,7 +659,16 @@ async function fecharTicket(channel, closedBy, guild) {
   // Deleta o canal após 5 segundos
   const embed = embedPadrao('🔒 Ticket a Fechar', 'Este ticket será eliminado em **5 segundos**...', CONFIG.COR_ERRO);
   await channel.send({ embeds: [embed] });
-  setTimeout(() => channel.delete().catch(() => {}), 5000);
+  setTimeout(async () => {
+    try {
+      await channel.delete();
+    } catch (err) {
+      console.error(`❌ Erro ao eliminar canal do ticket #${ticket.ticket_number} (${channel.id}):`, err.message);
+      await channel.send({
+        content: `⚠️ Não foi possível eliminar este canal automaticamente (\`${err.message}\`). Verifica se o bot tem a permissão **Gerir Canais** aqui, ou apaga manualmente.`
+      }).catch(() => {});
+    }
+  }, 5000);
 }
 
 // ============================
@@ -2354,7 +2363,7 @@ async function handleButton(interaction) {
       return interaction.reply({ content: '❌ Esta votação já não está ativa.', ephemeral: true });
     }
 
-    const hojeStr = new Date().toISOString().slice(0, 10);
+    const hojeStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Lisbon' });
     if (config.data_atual !== hojeStr) {
       return interaction.reply({ content: '❌ Esta votação já não está ativa.', ephemeral: true });
     }
@@ -2762,7 +2771,12 @@ async function publicarVotacao(guild, config, hojeStr) {
   }
 
   try {
-    const msg = await canal.send({ content: '@everyone', embeds: [embed], components: rows });
+    const msg = await canal.send({
+      content: '@everyone',
+      embeds: [embed],
+      components: rows,
+      allowedMentions: { parse: ['everyone'] }
+    });
     db.prepare(`
       UPDATE votacao_config
       SET ativa_hoje = 1, encerrada_hoje = 0, data_atual = ?, message_id = ?
@@ -2829,11 +2843,12 @@ async function encerrarVotacao(guild, config, hojeStr) {
   db.prepare('DELETE FROM votacao_votos WHERE guild_id = ? AND data = ?').run(guild.id, hojeStr);
 }
 
-/** Verifica todas as votações configuradas e publica/encerra conforme a hora atual */
+/** Verifica todas as votações configuradas e publica/encerra conforme a hora atual (fuso: Europe/Lisbon) */
 async function verificarVotacoes() {
   const now = new Date();
-  const horaAtual = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-  const hojeStr = now.toISOString().slice(0, 10);
+  // Usa sempre a hora de Portugal, independentemente do fuso horário do servidor (Render usa UTC)
+  const horaAtual = now.toLocaleTimeString('pt-PT', { timeZone: 'Europe/Lisbon', hour: '2-digit', minute: '2-digit', hour12: false });
+  const hojeStr = now.toLocaleDateString('en-CA', { timeZone: 'Europe/Lisbon' }); // formato YYYY-MM-DD
 
   const configs = db.prepare('SELECT * FROM votacao_config').all();
 
