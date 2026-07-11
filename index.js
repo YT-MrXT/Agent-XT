@@ -18,16 +18,6 @@
 //  (GUILD_ID removido — bot global em todos os servidores)
 //
 // ============================================================
-const http = require('http');
-
-// Cria o servidor web que o Render exige para manter o bot vivo
-http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Bot Agent XT Online!');
-}).listen(process.env.PORT || 3000, () => {
-  console.log("🌐 Servidor web de monitorização iniciado!");
-});
-
 
 'use strict';
 
@@ -338,6 +328,37 @@ function initDatabase() {
       token      TEXT,
       guilds     TEXT,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  // Votações
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS votacao_config (
+      guild_id      TEXT PRIMARY KEY,
+      channel_id    TEXT NOT NULL,
+      titulo        TEXT NOT NULL,
+      descricao     TEXT NOT NULL,
+      opcoes        TEXT NOT NULL,
+      hora_inicio   TEXT NOT NULL,
+      hora_fim      TEXT NOT NULL,
+      message_id    TEXT,
+      ativa_hoje    INTEGER DEFAULT 0,
+      encerrada_hoje INTEGER DEFAULT 0,
+      data_atual    TEXT,
+      created_by    TEXT,
+      created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  // Votos do dia (reiniciados a cada nova votação diária)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS votacao_votos (
+      guild_id   TEXT NOT NULL,
+      data       TEXT NOT NULL,
+      user_id    TEXT NOT NULL,
+      opcao      TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (guild_id, data, user_id)
     );
   `);
 
@@ -1227,6 +1248,17 @@ const commands = [
     .addBooleanOption(o => o.setName('anti-raid').setDescription('Proteção anti-raid').setRequired(false))
     .addChannelOption(o => o.setName('log').setDescription('Canal de log do AntiSpam').setRequired(false)),
 
+  // ── Votações ──
+  new SlashCommandBuilder()
+    .setName('votação-setup')
+    .setDescription('Configura a votação diária automática deste servidor')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('remover-votação')
+    .setDescription('Remove a votação diária configurada neste servidor')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
   // ── Help ──
   new SlashCommandBuilder()
     .setName('help')
@@ -1944,6 +1976,78 @@ async function handleSlashCommand(interaction) {
   // HELP
   // ─────────────────────────────────────────────
 
+  // ─────────────────────────────────────────────
+  // VOTAÇÃO DIÁRIA
+  // ─────────────────────────────────────────────
+
+  if (commandName === 'votação-setup') {
+    const modal = new ModalBuilder()
+      .setCustomId('votacao_setup_modal')
+      .setTitle('🗳️ Configurar Votação Diária');
+
+    const tituloInput = new TextInputBuilder()
+      .setCustomId('votacao_titulo')
+      .setLabel('Título da votação')
+      .setPlaceholder('Ex: Votação do Dia')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMaxLength(200);
+
+    const descricaoInput = new TextInputBuilder()
+      .setCustomId('votacao_descricao')
+      .setLabel('Descrição da votação')
+      .setPlaceholder('Ex: Vota na tua opção favorita do dia!')
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true)
+      .setMaxLength(1000);
+
+    const opcoesInput = new TextInputBuilder()
+      .setCustomId('votacao_opcoes')
+      .setLabel('Opções dos botões (separadas por vírgula)')
+      .setPlaceholder('Ex: Opção A, Opção B, Opção C (máx. 10)')
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true)
+      .setMaxLength(500);
+
+    const horaInicioInput = new TextInputBuilder()
+      .setCustomId('votacao_hora_inicio')
+      .setLabel('Hora de início (formato 24h HH:MM)')
+      .setPlaceholder('Ex: 12:00')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMinLength(4)
+      .setMaxLength(5);
+
+    const horaFimInput = new TextInputBuilder()
+      .setCustomId('votacao_hora_fim')
+      .setLabel('Hora de fim (formato 24h HH:MM)')
+      .setPlaceholder('Ex: 20:30')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMinLength(4)
+      .setMaxLength(5);
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(tituloInput),
+      new ActionRowBuilder().addComponents(descricaoInput),
+      new ActionRowBuilder().addComponents(opcoesInput),
+      new ActionRowBuilder().addComponents(horaInicioInput),
+      new ActionRowBuilder().addComponents(horaFimInput),
+    );
+
+    return interaction.showModal(modal);
+  }
+
+  if (commandName === 'remover-votação') {
+    const existente = db.prepare('SELECT * FROM votacao_config WHERE guild_id = ?').get(guild.id);
+    if (!existente) {
+      return interaction.reply({ content: '❌ Não há nenhuma votação configurada neste servidor.', ephemeral: true });
+    }
+    db.prepare('DELETE FROM votacao_config WHERE guild_id = ?').run(guild.id);
+    db.prepare('DELETE FROM votacao_votos WHERE guild_id = ?').run(guild.id);
+    return interaction.reply({ content: '✅ Votação diária removida com sucesso. Não será mais publicada nem contabilizada.', ephemeral: true });
+  }
+
   if (commandName === 'help') {
     const embed = new EmbedBuilder()
       .setTitle('📖 Comandos do Bot')
@@ -1994,6 +2098,11 @@ async function handleSlashCommand(interaction) {
         {
           name: '⚙️ Configuração',
           value: '`/logs-setup` · Configura o canal de logs\n`/antispam` · Configura o sistema AntiSpam',
+          inline: false,
+        },
+        {
+          name: '🗳️ Votação Diária',
+          value: '`/votação-setup` · Configura a votação diária automática\n`/remover-votação` · Remove a votação configurada',
           inline: false,
         },
         {
@@ -2236,6 +2345,34 @@ async function handleButton(interaction) {
     return interaction.showModal(modal);
   }
 
+  // ── Voto na votação diária ──
+  if (customId.startsWith('votacao_vote_')) {
+    const opcao = customId.slice('votacao_vote_'.length);
+
+    const config = db.prepare('SELECT * FROM votacao_config WHERE guild_id = ?').get(guild.id);
+    if (!config || !config.ativa_hoje || config.encerrada_hoje) {
+      return interaction.reply({ content: '❌ Esta votação já não está ativa.', ephemeral: true });
+    }
+
+    const hojeStr = new Date().toISOString().slice(0, 10);
+    if (config.data_atual !== hojeStr) {
+      return interaction.reply({ content: '❌ Esta votação já não está ativa.', ephemeral: true });
+    }
+
+    const opcoes = JSON.parse(config.opcoes);
+    if (!opcoes.includes(opcao)) {
+      return interaction.reply({ content: '❌ Opção inválida.', ephemeral: true });
+    }
+
+    db.prepare(`
+      INSERT INTO votacao_votos (guild_id, data, user_id, opcao)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(guild_id, data, user_id) DO UPDATE SET opcao=excluded.opcao
+    `).run(guild.id, hojeStr, user.id, opcao);
+
+    return interaction.reply({ content: `✅ O teu voto em **${opcao}** foi registado! Podes mudar de opção a qualquer momento até a votação fechar.`, ephemeral: true });
+  }
+
   // ── Votos em sugestões ──
   if (customId.startsWith('sug_up_') || customId.startsWith('sug_down_')) {
     const [,tipo, sugId] = customId.split('_');
@@ -2306,6 +2443,61 @@ async function handleSelectMenu(interaction) {
 // ============================
 async function handleModal(interaction) {
   const { customId, guild, user, channel } = interaction;
+
+  // ── Configuração da votação diária ──
+  if (customId === 'votacao_setup_modal') {
+    const titulo    = interaction.fields.getTextInputValue('votacao_titulo').trim();
+    const descricao = interaction.fields.getTextInputValue('votacao_descricao').trim();
+    const opcoesRaw = interaction.fields.getTextInputValue('votacao_opcoes').trim();
+    const horaInicio = interaction.fields.getTextInputValue('votacao_hora_inicio').trim();
+    const horaFim     = interaction.fields.getTextInputValue('votacao_hora_fim').trim();
+
+    const horaRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+    if (!horaRegex.test(horaInicio) || !horaRegex.test(horaFim)) {
+      return interaction.reply({ content: '❌ Formato de hora inválido. Usa o formato **HH:MM** (24h), ex: `12:00`.', ephemeral: true });
+    }
+
+    const opcoes = opcoesRaw.split(',').map(o => o.trim()).filter(o => o.length > 0);
+    if (opcoes.length < 2) {
+      return interaction.reply({ content: '❌ Precisas de pelo menos **2 opções** separadas por vírgula.', ephemeral: true });
+    }
+    if (opcoes.length > 10) {
+      return interaction.reply({ content: '❌ O máximo é **10 opções** (10 botões).', ephemeral: true });
+    }
+    if (opcoes.some(o => o.length > 80)) {
+      return interaction.reply({ content: '❌ Cada opção deve ter no máximo 80 caracteres.', ephemeral: true });
+    }
+
+    const [hiH, hiM] = horaInicio.split(':').map(Number);
+    const [hfH, hfM] = horaFim.split(':').map(Number);
+    if (hiH * 60 + hiM >= hfH * 60 + hfM) {
+      return interaction.reply({ content: '❌ A hora de início tem de ser antes da hora de fim.', ephemeral: true });
+    }
+
+    db.prepare(`
+      INSERT INTO votacao_config (guild_id, channel_id, titulo, descricao, opcoes, hora_inicio, hora_fim, created_by, ativa_hoje, encerrada_hoje, data_atual, message_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, NULL)
+      ON CONFLICT(guild_id) DO UPDATE SET
+        channel_id=excluded.channel_id,
+        titulo=excluded.titulo,
+        descricao=excluded.descricao,
+        opcoes=excluded.opcoes,
+        hora_inicio=excluded.hora_inicio,
+        hora_fim=excluded.hora_fim,
+        created_by=excluded.created_by,
+        ativa_hoje=0,
+        encerrada_hoje=0,
+        data_atual=NULL,
+        message_id=NULL
+    `).run(guild.id, channel.id, titulo, descricao, JSON.stringify(opcoes), horaInicio, horaFim, user.id);
+
+    const embed = embedPadrao(
+      '✅ Votação Diária Configurada',
+      `**Título:** ${titulo}\n**Descrição:** ${descricao}\n**Opções:** ${opcoes.join(' • ')}\n**Início:** ${horaInicio}\n**Fim:** ${horaFim}\n**Canal:** ${channel}\n\nA votação será publicada automaticamente todos os dias às **${horaInicio}** e encerrada às **${horaFim}**.`,
+      CONFIG.COR_SUCESSO
+    );
+    return interaction.reply({ embeds: [embed], ephemeral: true });
+  }
 
   // ── Avaliação de staff ──
   if (customId.startsWith('rating_')) {
@@ -2540,6 +2732,135 @@ client.on(Events.ChannelDelete, channel => {
 });
 
 // ============================
+// SISTEMA DE VOTAÇÃO DIÁRIA
+// ============================
+
+/** Publica a votação do dia no canal configurado, marcando @everyone */
+async function publicarVotacao(guild, config, hojeStr) {
+  const canal = guild.channels.cache.get(config.channel_id);
+  if (!canal) return;
+
+  const opcoes = JSON.parse(config.opcoes);
+
+  const embed = new EmbedBuilder()
+    .setTitle(`🗳️ ${config.titulo}`)
+    .setDescription(`${config.descricao}\n\nVotação aberta até às **${config.hora_fim}**. Clica num botão para votares!`)
+    .setColor(CONFIG.COR_PRINCIPAL)
+    .setTimestamp();
+
+  const rows = [];
+  for (let i = 0; i < opcoes.length; i += 5) {
+    const row = new ActionRowBuilder().addComponents(
+      opcoes.slice(i, i + 5).map(o =>
+        new ButtonBuilder()
+          .setCustomId(`votacao_vote_${o}`)
+          .setLabel(o.slice(0, 80))
+          .setStyle(ButtonStyle.Primary)
+      )
+    );
+    rows.push(row);
+  }
+
+  try {
+    const msg = await canal.send({ content: '@everyone', embeds: [embed], components: rows });
+    db.prepare(`
+      UPDATE votacao_config
+      SET ativa_hoje = 1, encerrada_hoje = 0, data_atual = ?, message_id = ?
+      WHERE guild_id = ?
+    `).run(hojeStr, msg.id, guild.id);
+  } catch (err) {
+    console.error(`❌ Erro ao publicar votação em ${guild.id}:`, err.message);
+  }
+}
+
+/** Encerra a votação do dia, conta os votos e anuncia o(s) vencedor(es) */
+async function encerrarVotacao(guild, config, hojeStr) {
+  const canal = guild.channels.cache.get(config.channel_id);
+
+  const votos = db.prepare('SELECT opcao, COUNT(*) as total FROM votacao_votos WHERE guild_id = ? AND data = ? GROUP BY opcao').all(guild.id, hojeStr);
+
+  const opcoes = JSON.parse(config.opcoes);
+  const contagem = {};
+  opcoes.forEach(o => contagem[o] = 0);
+  votos.forEach(v => { contagem[v.opcao] = v.total; });
+
+  const totalVotos = Object.values(contagem).reduce((a, b) => a + b, 0);
+  const maxVotos = Math.max(0, ...Object.values(contagem));
+  const vencedores = maxVotos > 0 ? Object.keys(contagem).filter(o => contagem[o] === maxVotos) : [];
+
+  // Desativa os botões da mensagem original
+  if (canal && config.message_id) {
+    try {
+      const msg = await canal.messages.fetch(config.message_id);
+      const oldRows = msg.components.map(row =>
+        new ActionRowBuilder().addComponents(
+          row.components.map(c => ButtonBuilder.from(c).setDisabled(true))
+        )
+      );
+      await msg.edit({ components: oldRows });
+    } catch (_) {}
+  }
+
+  if (canal) {
+    const ranking = Object.entries(contagem)
+      .sort((a, b) => b[1] - a[1])
+      .map(([opcao, total]) => `**${opcao}** — ${total} voto${total === 1 ? '' : 's'}`)
+      .join('\n');
+
+    let resultadoTexto;
+    if (totalVotos === 0) {
+      resultadoTexto = 'Ninguém votou hoje. 😕';
+    } else if (vencedores.length === 1) {
+      resultadoTexto = `🏆 A opção vencedora foi **${vencedores[0]}** com **${maxVotos}** voto${maxVotos === 1 ? '' : 's'}!`;
+    } else {
+      resultadoTexto = `🏆 Empate entre: **${vencedores.join(', ')}**, cada uma com **${maxVotos}** votos!`;
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle(`🗳️ Resultado: ${config.titulo}`)
+      .setDescription(`${resultadoTexto}\n\n**Resultados:**\n${ranking}\n\n**Total de votos:** ${totalVotos}`)
+      .setColor(CONFIG.COR_SUCESSO)
+      .setTimestamp();
+
+    await canal.send({ embeds: [embed] }).catch(() => {});
+  }
+
+  db.prepare('UPDATE votacao_config SET encerrada_hoje = 1, ativa_hoje = 0 WHERE guild_id = ?').run(guild.id);
+  db.prepare('DELETE FROM votacao_votos WHERE guild_id = ? AND data = ?').run(guild.id, hojeStr);
+}
+
+/** Verifica todas as votações configuradas e publica/encerra conforme a hora atual */
+async function verificarVotacoes() {
+  const now = new Date();
+  const horaAtual = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const hojeStr = now.toISOString().slice(0, 10);
+
+  const configs = db.prepare('SELECT * FROM votacao_config').all();
+
+  for (const config of configs) {
+    const guild = client.guilds.cache.get(config.guild_id);
+    if (!guild) continue;
+
+    // Novo dia: reinicia flags se necessário
+    if (config.data_atual !== hojeStr && (config.ativa_hoje || config.encerrada_hoje)) {
+      db.prepare('UPDATE votacao_config SET ativa_hoje = 0, encerrada_hoje = 0 WHERE guild_id = ?').run(config.guild_id);
+      config.ativa_hoje = 0;
+      config.encerrada_hoje = 0;
+    }
+
+    // Hora de iniciar
+    if (horaAtual === config.hora_inicio && !config.ativa_hoje) {
+      await publicarVotacao(guild, config, hojeStr).catch(err => console.error('❌ Erro ao publicar votação:', err.message));
+    }
+
+    // Hora de encerrar
+    if (horaAtual === config.hora_fim && config.ativa_hoje && !config.encerrada_hoje) {
+      await encerrarVotacao(guild, config, hojeStr).catch(err => console.error('❌ Erro ao encerrar votação:', err.message));
+    }
+  }
+}
+
+// ============================
 // CRONS (TAREFAS AGENDADAS)
 // ============================
 function iniciarCrons() {
@@ -2553,6 +2874,9 @@ function iniciarCrons() {
   // Reafirma a presença/atividade a cada 10 minutos, como rede de segurança
   // caso o evento de reconexão do gateway não dispare por alguma razão.
   cron.schedule('*/10 * * * *', () => definirPresenca());
+
+  // Verifica votações diárias a cada minuto (início/fim)
+  cron.schedule('* * * * *', () => verificarVotacoes());
 
   console.log('⏰ Crons agendados.');
 }
