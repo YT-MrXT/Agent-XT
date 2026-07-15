@@ -336,11 +336,13 @@ function initDatabase() {
     CREATE TABLE IF NOT EXISTS votacao_config (
       guild_id      TEXT PRIMARY KEY,
       channel_id    TEXT NOT NULL,
+      tipo          TEXT NOT NULL DEFAULT 'recorrente',
       titulo        TEXT NOT NULL,
       descricao     TEXT NOT NULL,
       opcoes        TEXT NOT NULL,
-      hora_inicio   TEXT NOT NULL,
+      hora_inicio   TEXT,
       hora_fim      TEXT NOT NULL,
+      data_fim      TEXT,
       message_id    TEXT,
       ativa_hoje    INTEGER DEFAULT 0,
       encerrada_hoje INTEGER DEFAULT 0,
@@ -349,6 +351,11 @@ function initDatabase() {
       created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+  // Migração defensiva: adiciona colunas novas se a tabela já existir de uma versão anterior
+  const votacaoCols = db.prepare("PRAGMA table_info(votacao_config)").all().map(c => c.name);
+  if (!votacaoCols.includes('tipo'))     db.exec("ALTER TABLE votacao_config ADD COLUMN tipo TEXT NOT NULL DEFAULT 'recorrente'");
+  if (!votacaoCols.includes('data_fim')) db.exec("ALTER TABLE votacao_config ADD COLUMN data_fim TEXT");
 
   // Votos do dia (reiniciados a cada nova votação diária)
   db.exec(`
@@ -1260,8 +1267,13 @@ const commands = [
   // ── Votações ──
   new SlashCommandBuilder()
     .setName('votação-setup')
-    .setDescription('Configura a votação diária automática deste servidor')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    .setDescription('Configura uma votação neste servidor')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(o => o.setName('modo').setDescription('Tipo de votação').setRequired(true)
+      .addChoices(
+        { name: 'Recorrente (todos os dias)', value: 'recorrente' },
+        { name: 'Um dia único (começa agora)', value: 'unica' },
+      )),
 
   new SlashCommandBuilder()
     .setName('remover-votação')
@@ -1990,14 +2002,75 @@ async function handleSlashCommand(interaction) {
   // ─────────────────────────────────────────────
 
   if (commandName === 'votação-setup') {
+    const modo = options.getString('modo'); // 'recorrente' | 'unica'
+
+    if (modo === 'recorrente') {
+      const modal = new ModalBuilder()
+        .setCustomId('votacao_setup_modal_recorrente')
+        .setTitle('🗳️ Votação Recorrente (diária)');
+
+      const tituloInput = new TextInputBuilder()
+        .setCustomId('votacao_titulo')
+        .setLabel('Título da votação')
+        .setPlaceholder('Ex: Votação do Dia')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(200);
+
+      const descricaoInput = new TextInputBuilder()
+        .setCustomId('votacao_descricao')
+        .setLabel('Descrição da votação')
+        .setPlaceholder('Ex: Vota na tua opção favorita do dia!')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+        .setMaxLength(1000);
+
+      const opcoesInput = new TextInputBuilder()
+        .setCustomId('votacao_opcoes')
+        .setLabel('Opções dos botões (separadas por vírgula)')
+        .setPlaceholder('Ex: Opção A, Opção B, Opção C (máx. 10)')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+        .setMaxLength(500);
+
+      const horaInicioInput = new TextInputBuilder()
+        .setCustomId('votacao_hora_inicio')
+        .setLabel('Hora de início (formato 24h HH:MM)')
+        .setPlaceholder('Ex: 12:00')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMinLength(4)
+        .setMaxLength(5);
+
+      const horaFimInput = new TextInputBuilder()
+        .setCustomId('votacao_hora_fim')
+        .setLabel('Hora de fim (formato 24h HH:MM)')
+        .setPlaceholder('Ex: 20:30')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMinLength(4)
+        .setMaxLength(5);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(tituloInput),
+        new ActionRowBuilder().addComponents(descricaoInput),
+        new ActionRowBuilder().addComponents(opcoesInput),
+        new ActionRowBuilder().addComponents(horaInicioInput),
+        new ActionRowBuilder().addComponents(horaFimInput),
+      );
+
+      return interaction.showModal(modal);
+    }
+
+    // modo === 'unica'
     const modal = new ModalBuilder()
-      .setCustomId('votacao_setup_modal')
-      .setTitle('🗳️ Configurar Votação Diária');
+      .setCustomId('votacao_setup_modal_unica')
+      .setTitle('🗳️ Votação de Um Dia Único');
 
     const tituloInput = new TextInputBuilder()
       .setCustomId('votacao_titulo')
       .setLabel('Título da votação')
-      .setPlaceholder('Ex: Votação do Dia')
+      .setPlaceholder('Ex: Votação Especial')
       .setStyle(TextInputStyle.Short)
       .setRequired(true)
       .setMaxLength(200);
@@ -2005,7 +2078,7 @@ async function handleSlashCommand(interaction) {
     const descricaoInput = new TextInputBuilder()
       .setCustomId('votacao_descricao')
       .setLabel('Descrição da votação')
-      .setPlaceholder('Ex: Vota na tua opção favorita do dia!')
+      .setPlaceholder('Ex: Vota na tua opção favorita!')
       .setStyle(TextInputStyle.Paragraph)
       .setRequired(true)
       .setMaxLength(1000);
@@ -2018,18 +2091,18 @@ async function handleSlashCommand(interaction) {
       .setRequired(true)
       .setMaxLength(500);
 
-    const horaInicioInput = new TextInputBuilder()
-      .setCustomId('votacao_hora_inicio')
-      .setLabel('Hora de início (formato 24h HH:MM)')
-      .setPlaceholder('Ex: 12:00')
+    const dataFimInput = new TextInputBuilder()
+      .setCustomId('votacao_data_fim')
+      .setLabel('Data em que fecha (formato DD/MM/AAAA)')
+      .setPlaceholder('Ex: 20/07/2026')
       .setStyle(TextInputStyle.Short)
       .setRequired(true)
-      .setMinLength(4)
-      .setMaxLength(5);
+      .setMinLength(8)
+      .setMaxLength(10);
 
     const horaFimInput = new TextInputBuilder()
       .setCustomId('votacao_hora_fim')
-      .setLabel('Hora de fim (formato 24h HH:MM)')
+      .setLabel('Hora em que fecha (formato 24h HH:MM)')
       .setPlaceholder('Ex: 20:30')
       .setStyle(TextInputStyle.Short)
       .setRequired(true)
@@ -2040,7 +2113,7 @@ async function handleSlashCommand(interaction) {
       new ActionRowBuilder().addComponents(tituloInput),
       new ActionRowBuilder().addComponents(descricaoInput),
       new ActionRowBuilder().addComponents(opcoesInput),
-      new ActionRowBuilder().addComponents(horaInicioInput),
+      new ActionRowBuilder().addComponents(dataFimInput),
       new ActionRowBuilder().addComponents(horaFimInput),
     );
 
@@ -2054,7 +2127,7 @@ async function handleSlashCommand(interaction) {
     }
     db.prepare('DELETE FROM votacao_config WHERE guild_id = ?').run(guild.id);
     db.prepare('DELETE FROM votacao_votos WHERE guild_id = ?').run(guild.id);
-    return interaction.reply({ content: '✅ Votação diária removida com sucesso. Não será mais publicada nem contabilizada.', ephemeral: true });
+    return interaction.reply({ content: '✅ Votação removida com sucesso. Não será mais publicada nem contabilizada.', ephemeral: true });
   }
 
   if (commandName === 'help') {
@@ -2110,8 +2183,8 @@ async function handleSlashCommand(interaction) {
           inline: false,
         },
         {
-          name: '🗳️ Votação Diária',
-          value: '`/votação-setup` · Configura a votação diária automática\n`/remover-votação` · Remove a votação configurada',
+          name: '🗳️ Votação',
+          value: '`/votação-setup` · Configura uma votação (recorrente diária ou de um dia único)\n`/remover-votação` · Remove a votação configurada',
           inline: false,
         },
         {
@@ -2453,8 +2526,8 @@ async function handleSelectMenu(interaction) {
 async function handleModal(interaction) {
   const { customId, guild, user, channel } = interaction;
 
-  // ── Configuração da votação diária ──
-  if (customId === 'votacao_setup_modal') {
+  // ── Configuração da votação recorrente (diária) ──
+  if (customId === 'votacao_setup_modal_recorrente') {
     const titulo    = interaction.fields.getTextInputValue('votacao_titulo').trim();
     const descricao = interaction.fields.getTextInputValue('votacao_descricao').trim();
     const opcoesRaw = interaction.fields.getTextInputValue('votacao_opcoes').trim();
@@ -2484,15 +2557,17 @@ async function handleModal(interaction) {
     }
 
     db.prepare(`
-      INSERT INTO votacao_config (guild_id, channel_id, titulo, descricao, opcoes, hora_inicio, hora_fim, created_by, ativa_hoje, encerrada_hoje, data_atual, message_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, NULL)
+      INSERT INTO votacao_config (guild_id, channel_id, tipo, titulo, descricao, opcoes, hora_inicio, hora_fim, data_fim, created_by, ativa_hoje, encerrada_hoje, data_atual, message_id)
+      VALUES (?, ?, 'recorrente', ?, ?, ?, ?, ?, NULL, ?, 0, 0, NULL, NULL)
       ON CONFLICT(guild_id) DO UPDATE SET
         channel_id=excluded.channel_id,
+        tipo='recorrente',
         titulo=excluded.titulo,
         descricao=excluded.descricao,
         opcoes=excluded.opcoes,
         hora_inicio=excluded.hora_inicio,
         hora_fim=excluded.hora_fim,
+        data_fim=NULL,
         created_by=excluded.created_by,
         ativa_hoje=0,
         encerrada_hoje=0,
@@ -2501,11 +2576,85 @@ async function handleModal(interaction) {
     `).run(guild.id, channel.id, titulo, descricao, JSON.stringify(opcoes), horaInicio, horaFim, user.id);
 
     const embed = embedPadrao(
-      '✅ Votação Diária Configurada',
+      '✅ Votação Recorrente Configurada',
       `**Título:** ${titulo}\n**Descrição:** ${descricao}\n**Opções:** ${opcoes.join(' • ')}\n**Início:** ${horaInicio}\n**Fim:** ${horaFim}\n**Canal:** ${channel}\n\nA votação será publicada automaticamente todos os dias às **${horaInicio}** e encerrada às **${horaFim}**.`,
       CONFIG.COR_SUCESSO
     );
     return interaction.reply({ embeds: [embed], ephemeral: true });
+  }
+
+  // ── Configuração da votação de um dia único (começa imediatamente) ──
+  if (customId === 'votacao_setup_modal_unica') {
+    const titulo    = interaction.fields.getTextInputValue('votacao_titulo').trim();
+    const descricao = interaction.fields.getTextInputValue('votacao_descricao').trim();
+    const opcoesRaw = interaction.fields.getTextInputValue('votacao_opcoes').trim();
+    const dataFim   = interaction.fields.getTextInputValue('votacao_data_fim').trim();
+    const horaFim   = interaction.fields.getTextInputValue('votacao_hora_fim').trim();
+
+    const dataRegex = /^(\d{2})\/(\d{2})\/(\d{4})$/;
+    const dataMatch = dataFim.match(dataRegex);
+    if (!dataMatch) {
+      return interaction.reply({ content: '❌ Formato de data inválido. Usa o formato **DD/MM/AAAA**, ex: `20/07/2026`.', ephemeral: true });
+    }
+
+    const horaRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+    if (!horaRegex.test(horaFim)) {
+      return interaction.reply({ content: '❌ Formato de hora inválido. Usa o formato **HH:MM** (24h), ex: `20:30`.', ephemeral: true });
+    }
+
+    const opcoes = opcoesRaw.split(',').map(o => o.trim()).filter(o => o.length > 0);
+    if (opcoes.length < 2) {
+      return interaction.reply({ content: '❌ Precisas de pelo menos **2 opções** separadas por vírgula.', ephemeral: true });
+    }
+    if (opcoes.length > 10) {
+      return interaction.reply({ content: '❌ O máximo é **10 opções** (10 botões).', ephemeral: true });
+    }
+    if (opcoes.some(o => o.length > 80)) {
+      return interaction.reply({ content: '❌ Cada opção deve ter no máximo 80 caracteres.', ephemeral: true });
+    }
+
+    const [, dd, mm, yyyy] = dataMatch;
+    const dataFimISO = `${yyyy}-${mm}-${dd}`; // YYYY-MM-DD, comparável com toLocaleDateString('en-CA', ...)
+
+    // Valida que a data/hora de fim é no futuro (fuso Europe/Lisbon)
+    const agora = new Date();
+    const hojeISO = agora.toLocaleDateString('en-CA', { timeZone: 'Europe/Lisbon' });
+    const horaAtual = agora.toLocaleTimeString('pt-PT', { timeZone: 'Europe/Lisbon', hour: '2-digit', minute: '2-digit', hour12: false });
+
+    if (dataFimISO < hojeISO || (dataFimISO === hojeISO && horaFim <= horaAtual)) {
+      return interaction.reply({ content: '❌ A data/hora de fim tem de ser no futuro.', ephemeral: true });
+    }
+
+    // Guarda a configuração já como ativa (a votação começa imediatamente)
+    db.prepare(`
+      INSERT INTO votacao_config (guild_id, channel_id, tipo, titulo, descricao, opcoes, hora_inicio, hora_fim, data_fim, created_by, ativa_hoje, encerrada_hoje, data_atual, message_id)
+      VALUES (?, ?, 'unica', ?, ?, ?, NULL, ?, ?, ?, 0, 0, NULL, NULL)
+      ON CONFLICT(guild_id) DO UPDATE SET
+        channel_id=excluded.channel_id,
+        tipo='unica',
+        titulo=excluded.titulo,
+        descricao=excluded.descricao,
+        opcoes=excluded.opcoes,
+        hora_inicio=NULL,
+        hora_fim=excluded.hora_fim,
+        data_fim=excluded.data_fim,
+        created_by=excluded.created_by,
+        ativa_hoje=0,
+        encerrada_hoje=0,
+        data_atual=NULL,
+        message_id=NULL
+    `).run(guild.id, channel.id, titulo, descricao, JSON.stringify(opcoes), horaFim, dataFimISO, user.id);
+
+    await interaction.reply({
+      content: `✅ Votação de dia único configurada! Vai começar já a ser publicada, e fecha em **${dataFimISO.split('-').reverse().join('/')} às ${horaFim}**.`,
+      ephemeral: true
+    });
+
+    // Publica imediatamente
+    const config = db.prepare('SELECT * FROM votacao_config WHERE guild_id = ?').get(guild.id);
+    await publicarVotacao(guild, config, hojeISO).catch(err => console.error('❌ Erro ao publicar votação única:', err.message));
+
+    return;
   }
 
   // ── Avaliação de staff ──
@@ -2839,8 +2988,15 @@ async function encerrarVotacao(guild, config, hojeStr) {
     await canal.send({ embeds: [embed] }).catch(() => {});
   }
 
-  db.prepare('UPDATE votacao_config SET encerrada_hoje = 1, ativa_hoje = 0 WHERE guild_id = ?').run(guild.id);
-  db.prepare('DELETE FROM votacao_votos WHERE guild_id = ? AND data = ?').run(guild.id, hojeStr);
+  if (config.tipo === 'unica') {
+    // Votação de dia único: não repete, remove a configuração por completo
+    db.prepare('DELETE FROM votacao_config WHERE guild_id = ?').run(guild.id);
+    db.prepare('DELETE FROM votacao_votos WHERE guild_id = ? AND data = ?').run(guild.id, hojeStr);
+  } else {
+    // Votação recorrente: fica pronta para o próximo dia
+    db.prepare('UPDATE votacao_config SET encerrada_hoje = 1, ativa_hoje = 0 WHERE guild_id = ?').run(guild.id);
+    db.prepare('DELETE FROM votacao_votos WHERE guild_id = ? AND data = ?').run(guild.id, hojeStr);
+  }
 }
 
 /** Verifica todas as votações configuradas e publica/encerra conforme a hora atual (fuso: Europe/Lisbon) */
@@ -2856,6 +3012,15 @@ async function verificarVotacoes() {
     const guild = client.guilds.cache.get(config.guild_id);
     if (!guild) continue;
 
+    if (config.tipo === 'unica') {
+      // Já foi publicada no momento do /votação-setup — só falta verificar a hora/data de encerrar
+      if (config.ativa_hoje && !config.encerrada_hoje && hojeStr === config.data_fim && horaAtual === config.hora_fim) {
+        await encerrarVotacao(guild, config, hojeStr).catch(err => console.error('❌ Erro ao encerrar votação única:', err.message));
+      }
+      continue;
+    }
+
+    // Votação recorrente (diária)
     // Novo dia: reinicia flags se necessário
     if (config.data_atual !== hojeStr && (config.ativa_hoje || config.encerrada_hoje)) {
       db.prepare('UPDATE votacao_config SET ativa_hoje = 0, encerrada_hoje = 0 WHERE guild_id = ?').run(config.guild_id);
@@ -3011,6 +3176,9 @@ app.get('/dashboard/:guildId', requireAuth, (req, res) => {
   const guildConfig  = db.prepare('SELECT * FROM guild_config WHERE guild_id = ?').get(guildId);
   const antispam     = db.prepare('SELECT * FROM antispam_config WHERE guild_id = ?').get(guildId);
   const statsConfig  = db.prepare('SELECT * FROM server_stats WHERE guild_id = ?').get(guildId);
+  const votacaoConfig = db.prepare('SELECT * FROM votacao_config WHERE guild_id = ?').get(guildId);
+  const sugestaoConfig = db.prepare('SELECT * FROM suggestion_config WHERE guild_id = ?').get(guildId);
+  const reactionRoles = db.prepare('SELECT * FROM reaction_roles WHERE guild_id = ? ORDER BY id DESC').all(guildId);
 
   // Stats rápidos
   const totalTickets  = db.prepare("SELECT COUNT(*) as c FROM tickets WHERE guild_id = ?").get(guildId)?.c || 0;
@@ -3030,7 +3198,7 @@ app.get('/dashboard/:guildId', requireAuth, (req, res) => {
     .map(c => ({ id: c.id, name: c.name }));
 
   res.send(renderGuildDashboard(req.session.user, guild, {
-    ticketConfig, guildConfig, antispam, statsConfig,
+    ticketConfig, guildConfig, antispam, statsConfig, votacaoConfig, sugestaoConfig, reactionRoles,
     totalTickets, openTickets, totalWarns, totalSugs,
     channels, roles, categories
   }));
@@ -3131,6 +3299,183 @@ app.get('/api/:guildId/staff-ranking', requireAuth, (req, res) => {
   res.json(ranking);
 });
 
+// ── Server Stats ──
+app.post('/api/:guildId/stats-config', requireAuth, async (req, res) => {
+  const { guildId } = req.params;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
+
+  const { enabled } = req.body;
+
+  try {
+    let config = db.prepare('SELECT * FROM server_stats WHERE guild_id = ?').get(guildId);
+    if (!config) {
+      db.prepare('INSERT INTO server_stats (guild_id) VALUES (?)').run(guildId);
+      config = db.prepare('SELECT * FROM server_stats WHERE guild_id = ?').get(guildId);
+    }
+
+    if (enabled) {
+      db.prepare('UPDATE server_stats SET enabled = 1 WHERE guild_id = ?').run(guildId);
+      await setupServerStats(guild, config);
+      await atualizarStats(guild);
+    } else {
+      db.prepare('UPDATE server_stats SET enabled = 0 WHERE guild_id = ?').run(guildId);
+    }
+
+    res.json({ ok: true, message: enabled ? '✅ Server Stats ativado e canais criados!' : '✅ Server Stats desativado.' });
+  } catch (e) {
+    console.error('Erro stats-config:', e.message);
+    res.status(500).json({ ok: false, message: `Erro: ${e.message}` });
+  }
+});
+
+app.post('/api/:guildId/stats-atualizar', requireAuth, async (req, res) => {
+  const { guildId } = req.params;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
+
+  try {
+    await atualizarStats(guild);
+    res.json({ ok: true, message: '✅ Estatísticas atualizadas!' });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: `Erro: ${e.message}` });
+  }
+});
+
+// ── Sugestões ──
+app.post('/api/:guildId/sugestao-config', requireAuth, (req, res) => {
+  const { guildId } = req.params;
+  const { channel_id, log_channel, ping_role, enabled } = req.body;
+
+  db.prepare(`
+    INSERT INTO suggestion_config (guild_id, channel_id, log_channel, ping_role, enabled)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(guild_id) DO UPDATE SET
+      channel_id=excluded.channel_id,
+      log_channel=excluded.log_channel,
+      ping_role=excluded.ping_role,
+      enabled=excluded.enabled
+  `).run(guildId, channel_id || null, log_channel || null, ping_role || null, enabled ? 1 : 0);
+
+  res.json({ ok: true, message: '✅ Configuração de sugestões guardada!' });
+});
+
+// ── Reaction Roles ──
+app.get('/api/:guildId/reaction-roles', requireAuth, (req, res) => {
+  const { guildId } = req.params;
+  const rr = db.prepare('SELECT * FROM reaction_roles WHERE guild_id = ? ORDER BY id DESC').all(guildId);
+  res.json(rr);
+});
+
+app.post('/api/:guildId/reaction-roles', requireAuth, async (req, res) => {
+  const { guildId } = req.params;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
+
+  const { channel_id, message_id, emoji, role_id } = req.body;
+  if (!channel_id || !message_id || !emoji || !role_id) {
+    return res.status(400).json({ ok: false, message: 'Preenche todos os campos.' });
+  }
+
+  try {
+    const canal = guild.channels.cache.get(channel_id);
+    if (!canal) return res.status(404).json({ ok: false, message: 'Canal não encontrado.' });
+
+    const msg = await canal.messages.fetch(message_id);
+    await msg.react(emoji);
+
+    db.prepare(`
+      INSERT OR REPLACE INTO reaction_roles (guild_id, channel_id, message_id, emoji, role_id)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(guildId, channel_id, message_id, emoji, role_id);
+
+    res.json({ ok: true, message: '✅ Reaction role adicionado!' });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: `Erro: ${e.message}` });
+  }
+});
+
+app.post('/api/:guildId/reaction-roles/delete', requireAuth, (req, res) => {
+  const { guildId } = req.params;
+  const { id } = req.body;
+
+  db.prepare('DELETE FROM reaction_roles WHERE id = ? AND guild_id = ?').run(id, guildId);
+  res.json({ ok: true, message: '✅ Reaction role removido!' });
+});
+
+// ── Votação ──
+app.post('/api/:guildId/votacao-config', requireAuth, (req, res) => {
+  const { guildId } = req.params;
+  const { channel_id, tipo, titulo, descricao, opcoes_raw, hora_inicio, hora_fim, data_fim } = req.body;
+
+  if (!channel_id || !titulo || !descricao || !opcoes_raw || !hora_fim) {
+    return res.status(400).json({ ok: false, message: 'Preenche todos os campos obrigatórios.' });
+  }
+
+  const opcoes = opcoes_raw.split(',').map(o => o.trim()).filter(o => o.length > 0);
+  if (opcoes.length < 2) return res.status(400).json({ ok: false, message: 'Precisas de pelo menos 2 opções separadas por vírgula.' });
+  if (opcoes.length > 10) return res.status(400).json({ ok: false, message: 'O máximo é 10 opções.' });
+  if (opcoes.some(o => o.length > 80)) return res.status(400).json({ ok: false, message: 'Cada opção deve ter no máximo 80 caracteres.' });
+
+  const horaRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+  if (!horaRegex.test(hora_fim)) return res.status(400).json({ ok: false, message: 'Formato de hora de fim inválido (HH:MM).' });
+
+  if (tipo === 'recorrente') {
+    if (!hora_inicio || !horaRegex.test(hora_inicio)) return res.status(400).json({ ok: false, message: 'Formato de hora de início inválido (HH:MM).' });
+    const [hiH, hiM] = hora_inicio.split(':').map(Number);
+    const [hfH, hfM] = hora_fim.split(':').map(Number);
+    if (hiH * 60 + hiM >= hfH * 60 + hfM) return res.status(400).json({ ok: false, message: 'A hora de início tem de ser antes da hora de fim.' });
+
+    db.prepare(`
+      INSERT INTO votacao_config (guild_id, channel_id, tipo, titulo, descricao, opcoes, hora_inicio, hora_fim, data_fim, ativa_hoje, encerrada_hoje, data_atual, message_id)
+      VALUES (?, ?, 'recorrente', ?, ?, ?, ?, ?, NULL, 0, 0, NULL, NULL)
+      ON CONFLICT(guild_id) DO UPDATE SET
+        channel_id=excluded.channel_id, tipo='recorrente', titulo=excluded.titulo, descricao=excluded.descricao,
+        opcoes=excluded.opcoes, hora_inicio=excluded.hora_inicio, hora_fim=excluded.hora_fim, data_fim=NULL,
+        ativa_hoje=0, encerrada_hoje=0, data_atual=NULL, message_id=NULL
+    `).run(guildId, channel_id, titulo, descricao, JSON.stringify(opcoes), hora_inicio, hora_fim);
+
+    return res.json({ ok: true, message: '✅ Votação recorrente configurada! Publica automaticamente todos os dias.' });
+  }
+
+  // tipo === 'unica'
+  if (!data_fim) return res.status(400).json({ ok: false, message: 'Escolhe a data de fim.' });
+  const dataRegex = /^\d{4}-\d{2}-\d{2}$/;
+  if (!dataRegex.test(data_fim)) return res.status(400).json({ ok: false, message: 'Data de fim inválida.' });
+
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
+
+  const agora = new Date();
+  const hojeISO = agora.toLocaleDateString('en-CA', { timeZone: 'Europe/Lisbon' });
+  const horaAtual = agora.toLocaleTimeString('pt-PT', { timeZone: 'Europe/Lisbon', hour: '2-digit', minute: '2-digit', hour12: false });
+  if (data_fim < hojeISO || (data_fim === hojeISO && hora_fim <= horaAtual)) {
+    return res.status(400).json({ ok: false, message: 'A data/hora de fim tem de ser no futuro.' });
+  }
+
+  db.prepare(`
+    INSERT INTO votacao_config (guild_id, channel_id, tipo, titulo, descricao, opcoes, hora_inicio, hora_fim, data_fim, ativa_hoje, encerrada_hoje, data_atual, message_id)
+    VALUES (?, ?, 'unica', ?, ?, ?, NULL, ?, ?, 0, 0, NULL, NULL)
+    ON CONFLICT(guild_id) DO UPDATE SET
+      channel_id=excluded.channel_id, tipo='unica', titulo=excluded.titulo, descricao=excluded.descricao,
+      opcoes=excluded.opcoes, hora_inicio=NULL, hora_fim=excluded.hora_fim, data_fim=excluded.data_fim,
+      ativa_hoje=0, encerrada_hoje=0, data_atual=NULL, message_id=NULL
+  `).run(guildId, channel_id, titulo, descricao, JSON.stringify(opcoes), hora_fim, data_fim);
+
+  // Publica imediatamente
+  const config = db.prepare('SELECT * FROM votacao_config WHERE guild_id = ?').get(guildId);
+  publicarVotacao(guild, config, hojeISO).catch(err => console.error('❌ Erro ao publicar votação única (dashboard):', err.message));
+
+  res.json({ ok: true, message: '✅ Votação de dia único configurada e publicada!' });
+});
+
+app.post('/api/:guildId/votacao-remove', requireAuth, (req, res) => {
+  const { guildId } = req.params;
+  db.prepare('DELETE FROM votacao_config WHERE guild_id = ?').run(guildId);
+  db.prepare('DELETE FROM votacao_votos WHERE guild_id = ?').run(guildId);
+  res.json({ ok: true, message: '✅ Votação removida!' });
+});
+
 // ============================
 // TEMPLATES HTML DO DASHBOARD
 // ============================
@@ -3221,6 +3566,9 @@ const dashboardCSS = `
   .toast.error   { border-left: 4px solid var(--danger); }
   .section-title { font-size: 1.4rem; font-weight: 800; margin-bottom: 24px; display: flex; align-items: center; gap: 10px; }
   .section-title span { font-size: 1.6rem; }
+  .data-table { width: 100%; border-collapse: collapse; }
+  .data-table th, .data-table td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+  .data-table th { color: var(--text2); font-weight: 700; text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.5px; }
 `;
 
 const dashboardJS = `
@@ -3261,6 +3609,88 @@ const dashboardJS = `
     } catch(e) { toast('❌ Erro de ligação', 'error'); }
   }
   document.addEventListener('DOMContentLoaded', initTabs);
+
+  // ── Reaction Roles ──
+  async function addReactionRole(guildId) {
+    const form = document.getElementById('form-rr-add');
+    const data = new FormData(form);
+    const body = new URLSearchParams(data).toString();
+    try {
+      const res = await fetch('/api/' + guildId + '/reaction-roles', {
+        method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body
+      });
+      const json = await res.json();
+      toast(json.ok ? json.message : ('❌ ' + json.message), json.ok ? 'success' : 'error');
+      if (json.ok) setTimeout(() => location.reload(), 800);
+    } catch(e) { toast('❌ Erro de ligação', 'error'); }
+  }
+  async function removeReactionRole(guildId, id) {
+    if (!confirm('Remover este reaction role?')) return;
+    try {
+      const res = await fetch('/api/' + guildId + '/reaction-roles/delete', {
+        method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: 'id=' + id
+      });
+      const json = await res.json();
+      toast(json.ok ? json.message : '❌ Erro', json.ok ? 'success' : 'error');
+      if (json.ok) setTimeout(() => location.reload(), 800);
+    } catch(e) { toast('❌ Erro de ligação', 'error'); }
+  }
+
+  // ── Server Stats ──
+  async function saveStatsConfig(guildId, enabled) {
+    try {
+      const res = await fetch('/api/' + guildId + '/stats-config', {
+        method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: 'enabled=' + (enabled ? '1' : '')
+      });
+      const json = await res.json();
+      toast(json.ok ? json.message : ('❌ ' + json.message), json.ok ? 'success' : 'error');
+      if (json.ok) setTimeout(() => location.reload(), 1000);
+    } catch(e) { toast('❌ Erro de ligação', 'error'); }
+  }
+  async function atualizarStatsNow(guildId) {
+    try {
+      const res = await fetch('/api/' + guildId + '/stats-atualizar', { method: 'POST' });
+      const json = await res.json();
+      toast(json.ok ? json.message : '❌ Erro', json.ok ? 'success' : 'error');
+    } catch(e) { toast('❌ Erro de ligação', 'error'); }
+  }
+
+  // ── Votação ──
+  function toggleVotacaoTipo() {
+    const tipo = document.getElementById('votacao-tipo').value;
+    document.getElementById('votacao-campos-recorrente').style.display = tipo === 'recorrente' ? '' : 'none';
+    document.getElementById('votacao-campos-unica').style.display = tipo === 'unica' ? '' : 'none';
+  }
+  async function saveVotacaoConfig(guildId) {
+    const form = document.getElementById('form-votacao');
+    const tipo = document.getElementById('votacao-tipo').value;
+    const data = new FormData(form);
+    if (tipo === 'recorrente') {
+      data.set('hora_fim', data.get('hora_fim_rec') || '');
+    } else {
+      data.set('hora_fim', data.get('hora_fim_unica') || '');
+    }
+    data.delete('hora_fim_rec');
+    data.delete('hora_fim_unica');
+    const body = new URLSearchParams(data).toString();
+    try {
+      const res = await fetch('/api/' + guildId + '/votacao-config', {
+        method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body
+      });
+      const json = await res.json();
+      toast(json.ok ? json.message : ('❌ ' + json.message), json.ok ? 'success' : 'error');
+      if (json.ok) setTimeout(() => location.reload(), 1000);
+    } catch(e) { toast('❌ Erro de ligação', 'error'); }
+  }
+  async function removeVotacao(guildId) {
+    if (!confirm('Remover a votação configurada?')) return;
+    try {
+      const res = await fetch('/api/' + guildId + '/votacao-remove', { method: 'POST' });
+      const json = await res.json();
+      toast(json.ok ? json.message : '❌ Erro', json.ok ? 'success' : 'error');
+      if (json.ok) setTimeout(() => location.reload(), 800);
+    } catch(e) { toast('❌ Erro de ligação', 'error'); }
+  }
 `;
 
 /** Renderiza a página de login */
@@ -3365,7 +3795,7 @@ function renderDashboard(user, selectedGuild, error = null) {
 
 /** Renderiza o dashboard completo de um servidor */
 function renderGuildDashboard(user, guild, data) {
-  const { ticketConfig, guildConfig, antispam, statsConfig, totalTickets, openTickets, totalWarns, totalSugs, channels, roles, categories } = data;
+  const { ticketConfig, guildConfig, antispam, statsConfig, votacaoConfig, sugestaoConfig, reactionRoles, totalTickets, openTickets, totalWarns, totalSugs, channels, roles, categories } = data;
 
   const makeSelect = (name, options, current, placeholder='Seleciona...') =>
     `<select name="${name}" id="${name}">
@@ -3409,6 +3839,8 @@ function renderGuildDashboard(user, guild, data) {
       ['⭐','Avaliações Staff','ratings'],
       ['💡','Sugestões','suggestions_tab'],
       ['🎭','Reaction Roles','rr_tab'],
+      ['📈','Server Stats','stats_tab'],
+      ['🗳️','Votação','votacao_tab'],
     ].map(([ico,lbl,id]) => `<button class="sidebar-item" onclick="showSection('${id}')">${ico} ${lbl}</button>`).join('')}
   </div>
 
@@ -3575,6 +4007,33 @@ function renderGuildDashboard(user, guild, data) {
     <div id="suggestions_tab" class="section" style="display:none">
       <div class="section-title"><span>💡</span> Sugestões</div>
       <div class="card">
+        <h2>⚙️ Configuração</h2>
+        <form id="form-sugestao">
+          <div class="form-group">
+            <label class="toggle">
+              <input type="checkbox" name="enabled" value="1" ${sugestaoConfig?.enabled ? 'checked' : ''}>
+              <span><strong>Ativar Sistema de Sugestões</strong></span>
+            </label>
+          </div>
+          <div class="grid-2">
+            <div class="form-group">
+              <label>Canal de Sugestões</label>
+              ${makeSelect('channel_id', channels, sugestaoConfig?.channel_id, 'Canal')}
+            </div>
+            <div class="form-group">
+              <label>Canal de Log</label>
+              ${makeSelect('log_channel', channels, sugestaoConfig?.log_channel, 'Canal')}
+            </div>
+            <div class="form-group">
+              <label>Cargo a Mencionar (opcional)</label>
+              ${makeSelect('ping_role', roles, sugestaoConfig?.ping_role, 'Nenhum')}
+            </div>
+          </div>
+          <button type="button" class="btn btn-primary" onclick="saveConfig('${guild.id}','sugestao-config','form-sugestao')">💾 Guardar Configuração</button>
+        </form>
+      </div>
+      <div class="card" style="margin-top:20px">
+        <h2>📋 Sugestões Recentes</h2>
         <div id="sugs-table">A carregar...</div>
       </div>
     </div>
@@ -3583,8 +4042,140 @@ function renderGuildDashboard(user, guild, data) {
     <div id="rr_tab" class="section" style="display:none">
       <div class="section-title"><span>🎭</span> Reaction Roles</div>
       <div class="card">
-        <p style="color:var(--text2)">Usa o comando <code>/rr-adicionar</code> no Discord para configurar reaction roles.</p>
-        <p style="color:var(--text2);margin-top:8px">Em breve: gestão completa pelo dashboard!</p>
+        <h2>➕ Adicionar Reaction Role</h2>
+        <p style="color:var(--text2);font-size:0.85rem;margin-bottom:16px">A mensagem tem de já existir no canal escolhido. Copia o ID da mensagem com o modo de programador ativo no Discord.</p>
+        <form id="form-rr-add">
+          <div class="grid-2">
+            <div class="form-group">
+              <label>Canal da Mensagem</label>
+              ${makeSelect('channel_id', channels, '', 'Canal')}
+            </div>
+            <div class="form-group">
+              <label>ID da Mensagem</label>
+              <input type="text" name="message_id" placeholder="Ex: 123456789012345678">
+            </div>
+            <div class="form-group">
+              <label>Emoji</label>
+              <input type="text" name="emoji" placeholder="Ex: ✅ ou :nome_emoji:">
+            </div>
+            <div class="form-group">
+              <label>Cargo a Atribuir</label>
+              ${makeSelect('role_id', roles, '', 'Cargo')}
+            </div>
+          </div>
+          <button type="button" class="btn btn-primary" onclick="addReactionRole('${guild.id}')">➕ Adicionar</button>
+        </form>
+      </div>
+      <div class="card" style="margin-top:20px">
+        <h2>📋 Reaction Roles Configurados</h2>
+        <div id="rr-table">
+          ${reactionRoles.length ? `
+            <table class="data-table">
+              <thead><tr><th>Emoji</th><th>Cargo</th><th>Canal</th><th>Mensagem</th><th></th></tr></thead>
+              <tbody>
+                ${reactionRoles.map(rr => `
+                  <tr>
+                    <td>${rr.emoji}</td>
+                    <td>${roles.find(r=>r.id===rr.role_id)?.name || rr.role_id}</td>
+                    <td>${channels.find(c=>c.id===rr.channel_id)?.name || rr.channel_id}</td>
+                    <td style="font-size:0.75rem;color:var(--text2)">${rr.message_id}</td>
+                    <td><button type="button" class="btn btn-danger" style="padding:4px 10px;font-size:0.8rem" onclick="removeReactionRole('${guild.id}', ${rr.id})">🗑️</button></td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          ` : `<p style="color:var(--text2)">Ainda não há reaction roles configurados.</p>`}
+        </div>
+      </div>
+    </div>
+
+    <!-- SERVER STATS -->
+    <div id="stats_tab" class="section" style="display:none">
+      <div class="section-title"><span>📈</span> Server Stats</div>
+      <div class="card">
+        <div class="form-group">
+          <label class="toggle">
+            <input type="checkbox" id="stats-enabled" ${statsConfig?.enabled ? 'checked' : ''}>
+            <span><strong>Ativar Server Stats</strong> (cria canais de voz com contagens que se atualizam sozinhas)</span>
+          </label>
+        </div>
+        <div style="margin:8px 0 16px;padding:12px;background:var(--bg3);border-radius:8px;font-size:0.85rem;color:var(--text2)">
+          <strong>ℹ️ Como funciona:</strong> ao ativar, o bot cria automaticamente uma categoria com canais de voz (membros, bots, canais, cargos, online, boosts) que mostram as contagens no próprio nome do canal, atualizados a cada 5 minutos.
+        </div>
+        <div class="grid-2">
+          <button type="button" class="btn btn-primary" onclick="saveStatsConfig('${guild.id}', true)">✅ Ativar / Criar Canais</button>
+          <button type="button" class="btn btn-danger" onclick="saveStatsConfig('${guild.id}', false)">⛔ Desativar</button>
+        </div>
+        ${statsConfig?.enabled ? `
+          <button type="button" class="btn btn-primary" style="margin-top:12px" onclick="atualizarStatsNow('${guild.id}')">🔄 Forçar Atualização Agora</button>
+        ` : ''}
+      </div>
+    </div>
+
+    <!-- VOTAÇÃO -->
+    <div id="votacao_tab" class="section" style="display:none">
+      <div class="section-title"><span>🗳️</span> Votação</div>
+      <div class="card">
+        <h2>⚙️ Configurar Votação</h2>
+        <form id="form-votacao">
+          <div class="form-group">
+            <label>Tipo de Votação</label>
+            <select name="tipo" id="votacao-tipo" onchange="toggleVotacaoTipo()">
+              <option value="recorrente" ${(!votacaoConfig || votacaoConfig.tipo==='recorrente') ? 'selected' : ''}>Recorrente (todos os dias)</option>
+              <option value="unica" ${votacaoConfig?.tipo==='unica' ? 'selected' : ''}>Um dia único (começa agora ao guardar)</option>
+            </select>
+          </div>
+          <div class="grid-2">
+            <div class="form-group">
+              <label>Canal onde publicar</label>
+              ${makeSelect('channel_id', channels, votacaoConfig?.channel_id, 'Canal')}
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Título</label>
+            <input type="text" name="titulo" value="${votacaoConfig?.titulo || ''}" placeholder="Ex: Votação do Dia" maxlength="200">
+          </div>
+          <div class="form-group">
+            <label>Descrição</label>
+            <textarea name="descricao" rows="2" placeholder="Ex: Vota na tua opção favorita!">${votacaoConfig?.descricao || ''}</textarea>
+          </div>
+          <div class="form-group">
+            <label>Opções dos botões (separadas por vírgula, máx. 10)</label>
+            <input type="text" name="opcoes_raw" value="${votacaoConfig ? JSON.parse(votacaoConfig.opcoes).join(', ') : ''}" placeholder="Ex: Opção A, Opção B, Opção C">
+          </div>
+          <div class="grid-2" id="votacao-campos-recorrente" style="${votacaoConfig?.tipo==='unica' ? 'display:none' : ''}">
+            <div class="form-group">
+              <label>Hora de Início (diária, HH:MM)</label>
+              <input type="text" name="hora_inicio" value="${votacaoConfig?.hora_inicio || ''}" placeholder="Ex: 12:00">
+            </div>
+            <div class="form-group">
+              <label>Hora de Fim (diária, HH:MM)</label>
+              <input type="text" name="hora_fim_rec" value="${votacaoConfig?.tipo!=='unica' ? (votacaoConfig?.hora_fim || '') : ''}" placeholder="Ex: 20:30">
+            </div>
+          </div>
+          <div class="grid-2" id="votacao-campos-unica" style="${votacaoConfig?.tipo==='unica' ? '' : 'display:none'}">
+            <div class="form-group">
+              <label>Data de Fim</label>
+              <input type="date" name="data_fim" value="${votacaoConfig?.data_fim || ''}">
+            </div>
+            <div class="form-group">
+              <label>Hora de Fim (HH:MM)</label>
+              <input type="text" name="hora_fim_unica" value="${votacaoConfig?.tipo==='unica' ? (votacaoConfig?.hora_fim || '') : ''}" placeholder="Ex: 20:30">
+            </div>
+          </div>
+          <div style="margin:8px 0 16px;padding:12px;background:var(--bg3);border-radius:8px;font-size:0.85rem;color:var(--text2)">
+            ⚠️ Guardar substitui qualquer votação já configurada neste servidor. Se for "Um dia único", a votação é publicada imediatamente com @everyone.
+          </div>
+          <div class="grid-2">
+            <button type="button" class="btn btn-primary" onclick="saveVotacaoConfig('${guild.id}')">💾 Guardar e Publicar</button>
+            ${votacaoConfig ? `<button type="button" class="btn btn-danger" onclick="removeVotacao('${guild.id}')">🗑️ Remover Votação Atual</button>` : ''}
+          </div>
+        </form>
+        ${votacaoConfig ? `
+          <div style="margin-top:20px;padding:12px;background:var(--bg3);border-radius:8px;font-size:0.85rem">
+            <strong>Estado atual:</strong> ${votacaoConfig.ativa_hoje ? '🟢 Ativa neste momento' : '⚪ Inativa (aguarda a próxima hora de início)'}
+          </div>
+        ` : ''}
       </div>
     </div>
 
@@ -3668,22 +4259,6 @@ app.listen(CONFIG.DASHBOARD_PORT, () => {
 
 } else {
   console.log('🌐 Dashboard web desativado (DASHBOARD_ATIVO=false) — a poupar RAM.');
-
-  // ============================
-  // SERVIDOR HTTP MÍNIMO (só para o Render detetar a porta)
-  // ============================
-  // O Render exige que um Web Service abra uma porta HTTP, senão fica
-  // sempre a repetir "No open ports detected". Como o dashboard completo
-  // está desligado (DASHBOARD_ATIVO=false), abrimos aqui um servidor
-  // mínimo, sem Express, só para responder ao health check do Render.
-  // Não interfere em nada do bot nem do dashboard.
-  const http = require('http');
-  http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('Bot Discord online. (Dashboard desativado — DASHBOARD_ATIVO=false)');
-  }).listen(CONFIG.DASHBOARD_PORT, () => {
-    console.log(`🌐 Porta ${CONFIG.DASHBOARD_PORT} aberta (servidor mínimo) — o Render já deteta a porta.`);
-  });
 }
 
 // ============================
