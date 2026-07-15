@@ -3188,6 +3188,62 @@ app.post('/api/:guildId/ticket-config', requireAuth, (req, res) => {
   res.json({ ok: true, message: 'Configuração de tickets guardada!' });
 });
 
+// Envia o painel de tickets (equivalente ao /ticket-painel), a partir do Dashboard
+app.post('/api/:guildId/ticket-painel', requireAuth, async (req, res) => {
+  const { guildId } = req.params;
+  const { channel_id, titulo, descricao } = req.body;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
+  if (!channel_id) return res.status(400).json({ ok: false, message: 'Escolhe um canal para o painel.' });
+
+  const ticketConfig = db.prepare('SELECT * FROM ticket_config WHERE guild_id = ?').get(guildId);
+  if (!ticketConfig) return res.status(400).json({ ok: false, message: 'Configura primeiro o sistema de tickets (categoria, etc.) antes de enviar o painel.' });
+
+  try {
+    const canal = guild.channels.cache.get(channel_id);
+    if (!canal) return res.status(404).json({ ok: false, message: 'Canal não encontrado.' });
+
+    const tituloFinal    = (titulo && titulo.trim()) || '🎫 Suporte';
+    const descricaoFinal = (descricao && descricao.trim()) || 'Clica no botão abaixo para abrir um ticket de suporte.\nA nossa equipa irá responder o mais brevemente possível!';
+
+    const tipos = db.prepare('SELECT * FROM ticket_types WHERE guild_id = ? ORDER BY order_num').all(guildId);
+
+    const embed = new EmbedBuilder()
+      .setTitle(tituloFinal)
+      .setDescription(descricaoFinal)
+      .setColor(CONFIG.COR_PRINCIPAL)
+      .setTimestamp();
+
+    let components = [];
+    if (tipos.length > 0) {
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId('ticket_create_select')
+        .setPlaceholder('Seleciona o tipo de ticket...')
+        .addOptions(tipos.map(t => ({
+          label: t.label,
+          description: t.description || `Abrir ticket: ${t.label}`,
+          emoji: t.emoji || '🎫',
+          value: `tipo_${t.id}`,
+        })));
+      components.push(new ActionRowBuilder().addComponents(menu));
+    } else {
+      const btn = new ButtonBuilder()
+        .setCustomId('ticket_create_simple')
+        .setLabel('🎫 Abrir Ticket')
+        .setStyle(ButtonStyle.Primary);
+      components.push(new ActionRowBuilder().addComponents(btn));
+    }
+
+    const msg = await canal.send({ embeds: [embed], components });
+
+    db.prepare(`UPDATE ticket_config SET panel_msg_id=?, panel_channel_id=? WHERE guild_id=?`).run(msg.id, canal.id, guildId);
+
+    res.json({ ok: true, message: `✅ Painel de tickets enviado em #${canal.name}!` });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: `Erro: ${e.message}` });
+  }
+});
+
 app.post('/api/:guildId/welcome-config', requireAuth, (req, res) => {
   const { guildId } = req.params;
   const { welcome_channel, welcome_msg, welcome_embed, autorole } = req.body;
@@ -3346,8 +3402,8 @@ app.post('/api/:guildId/reaction-roles', requireAuth, async (req, res) => {
   if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
 
   const { channel_id, conteudo } = req.body;
-  let emojis  = req.body['emoji[]'];
-  let cargos  = req.body['cargo[]'];
+  let emojis  = req.body.emoji;
+  let cargos  = req.body.cargo;
   if (!emojis) emojis = [];
   if (!cargos) cargos = [];
   if (!Array.isArray(emojis)) emojis = [emojis];
@@ -3980,7 +4036,7 @@ const dashboardJS = `
     if (linhas.length >= 5) { toast('❌ Máximo de 5 emojis por mensagem.', 'error'); return; }
     const nova = linhas[0].cloneNode(true);
     nova.querySelectorAll('input').forEach(i => i.value = '');
-    nova.querySelectorAll('select').forEach(s => s.value = '');
+    nova.querySelectorAll('select').forEach(s => { s.value = ''; s.removeAttribute('id'); });
     container.appendChild(nova);
   }
   async function addReactionRole(guildId) {
@@ -4103,6 +4159,18 @@ const dashboardJS = `
       const json = await res.json();
       toast(json.ok ? json.message : '❌ Erro', json.ok ? 'success' : 'error');
       if (json.ok) setTimeout(() => location.reload(), 800);
+    } catch(e) { toast('❌ Erro de ligação', 'error'); }
+  }
+  async function enviarPainelTicket(guildId) {
+    const form = document.getElementById('form-ticket-panel');
+    const data = new FormData(form);
+    const body = new URLSearchParams(data).toString();
+    try {
+      const res = await fetch('/api/' + guildId + '/ticket-painel', {
+        method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body
+      });
+      const json = await res.json();
+      toast(json.ok ? json.message : ('❌ ' + json.message), json.ok ? 'success' : 'error');
     } catch(e) { toast('❌ Erro de ligação', 'error'); }
   }
 
@@ -4425,6 +4493,30 @@ function renderGuildDashboard(user, guild, data) {
             </table>
           ` : `<p style="color:var(--text2)">Nenhum tipo de ticket criado ainda — o painel usará um botão simples.</p>`}
         </div>
+      </div>
+
+      <div class="card" style="margin-top:20px">
+        <h2>📤 Enviar Painel de Tickets</h2>
+        <p style="color:var(--text2);font-size:0.85rem;margin-bottom:16px">
+          Publica a mensagem com o botão (ou menu, se já tiveres tipos de ticket criados) para os membros abrirem tickets.
+          Certifica-te de que já guardaste a "Configuração de Tickets" acima antes de enviar.
+        </p>
+        <form id="form-ticket-panel">
+          <div class="form-group">
+            <label>Canal onde publicar o painel</label>
+            ${makeSelect('channel_id', channels, ticketConfig?.panel_channel_id, 'Canal')}
+          </div>
+          <div class="form-group">
+            <label>Título</label>
+            <input type="text" name="titulo" value="🎫 Suporte" maxlength="256">
+          </div>
+          <div class="form-group">
+            <label>Descrição</label>
+            <textarea name="descricao" rows="3">Clica no botão abaixo para abrir um ticket de suporte.
+A nossa equipa irá responder o mais brevemente possível!</textarea>
+          </div>
+          <button type="button" class="btn btn-primary" onclick="enviarPainelTicket('${guild.id}')">📤 Enviar Painel</button>
+        </form>
       </div>
     </div>
 
@@ -4769,8 +4861,8 @@ function renderGuildDashboard(user, guild, data) {
             <label>Emojis e Cargos (mínimo 1, máximo 5)</label>
             <div id="rr-pares">
               <div class="grid-2 rr-par" style="margin-bottom:10px">
-                <input type="text" name="emoji[]" placeholder="Emoji, ex: ✅">
-                ${makeSelect('cargo[]', roles, '', 'Cargo')}
+                <input type="text" name="emoji" placeholder="Emoji, ex: ✅">
+                ${makeSelect('cargo', roles, '', 'Cargo')}
               </div>
             </div>
             <button type="button" class="btn" style="margin-top:4px" onclick="addRrParLinha('${guild.id}')">➕ Adicionar outro emoji</button>
