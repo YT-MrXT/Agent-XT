@@ -210,6 +210,18 @@ function initDatabase() {
     );
   `);
 
+  // Painéis de Reaction Role criados via Dashboard (1 mensagem + vários emoji->cargo)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS reaction_role_panels (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id    TEXT NOT NULL,
+      channel_id  TEXT NOT NULL,
+      message_id  TEXT,
+      conteudo    TEXT NOT NULL,
+      created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
   // Moderação - Warns
   db.exec(`
     CREATE TABLE IF NOT EXISTS warns (
@@ -1063,27 +1075,7 @@ const commands = [
     .setDescription('Desativa o sistema de estatísticas')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
-  // ── Reaction Roles ──
-  new SlashCommandBuilder()
-    .setName('rr-adicionar')
-    .setDescription('Adiciona um reaction role a uma mensagem')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addStringOption(o => o.setName('message_id').setDescription('ID da mensagem').setRequired(true))
-    .addStringOption(o => o.setName('emoji').setDescription('Emoji para reagir').setRequired(true))
-    .addRoleOption(o => o.setName('cargo').setDescription('Cargo a atribuir').setRequired(true))
-    .addChannelOption(o => o.setName('canal').setDescription('Canal da mensagem').setRequired(false)),
-
-  new SlashCommandBuilder()
-    .setName('rr-remover')
-    .setDescription('Remove um reaction role')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addStringOption(o => o.setName('message_id').setDescription('ID da mensagem').setRequired(true))
-    .addStringOption(o => o.setName('emoji').setDescription('Emoji do reaction role').setRequired(true)),
-
-  new SlashCommandBuilder()
-    .setName('rr-lista')
-    .setDescription('Lista os reaction roles deste servidor')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
+  // ── Reaction Roles: geridos exclusivamente pelo Dashboard, sem comandos no Discord ──
 
   // ── Welcome ──
   new SlashCommandBuilder()
@@ -1571,50 +1563,8 @@ async function handleSlashCommand(interaction) {
   }
 
   // ─────────────────────────────────────────────
-  // REACTION ROLES
+  // REACTION ROLES: geridos exclusivamente pelo Dashboard (sem comandos no Discord)
   // ─────────────────────────────────────────────
-
-  if (commandName === 'rr-adicionar') {
-    const msgId = options.getString('message_id');
-    const emoji = options.getString('emoji');
-    const cargo = options.getRole('cargo');
-    const canal = options.getChannel('canal') || interaction.channel;
-
-    await interaction.deferReply({ ephemeral: true });
-
-    try {
-      const msg = await canal.messages.fetch(msgId);
-      await msg.react(emoji);
-
-      db.prepare(`
-        INSERT OR REPLACE INTO reaction_roles (guild_id, channel_id, message_id, emoji, role_id)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(guild.id, canal.id, msgId, emoji, cargo.id);
-
-      return interaction.editReply({ content: `✅ Reaction role adicionado! ${emoji} → ${cargo}` });
-    } catch (e) {
-      return interaction.editReply({ content: `❌ Erro: ${e.message}` });
-    }
-  }
-
-  if (commandName === 'rr-remover') {
-    const msgId = options.getString('message_id');
-    const emoji = options.getString('emoji');
-
-    db.prepare('DELETE FROM reaction_roles WHERE message_id = ? AND emoji = ?').run(msgId, emoji);
-    return interaction.reply({ content: `✅ Reaction role ${emoji} removido.`, ephemeral: true });
-  }
-
-  if (commandName === 'rr-lista') {
-    const rrs = db.prepare('SELECT * FROM reaction_roles WHERE guild_id = ?').all(guild.id);
-    if (!rrs.length) return interaction.reply({ content: '❌ Não há reaction roles configurados.', ephemeral: true });
-
-    const embed = embedPadrao(
-      '🎭 Reaction Roles',
-      rrs.map(r => `${r.emoji} → <@&${r.role_id}>\n↳ Mensagem: \`${r.message_id}\` em <#${r.channel_id}>`).join('\n\n')
-    );
-    return interaction.reply({ embeds: [embed], ephemeral: true });
-  }
 
   // ─────────────────────────────────────────────
   // WELCOME
@@ -2155,11 +2105,6 @@ async function handleSlashCommand(interaction) {
         {
           name: '💡 Sugestões',
           value: '`/sugerir` · Submete uma sugestão\n`/sugestao-setup` · Configura o sistema de sugestões\n`/sugestao-responder` · Aprova ou rejeita uma sugestão',
-          inline: false,
-        },
-        {
-          name: '🎭 Reaction Roles',
-          value: '`/rr-adicionar` · Adiciona um reaction role\n`/rr-remover` · Remove um reaction role\n`/rr-lista` · Lista os reaction roles',
           inline: false,
         },
         {
@@ -3163,7 +3108,7 @@ app.get('/dashboard', requireAuth, (req, res) => {
   res.send(renderDashboard(req.session.user, null));
 });
 
-app.get('/dashboard/:guildId', requireAuth, (req, res) => {
+app.get('/dashboard/:guildId', requireAuth, async (req, res) => {
   const { guildId } = req.params;
   const guild = client.guilds.cache.get(guildId);
   const userGuild = req.session.user.guilds?.find(g => g.id === guildId);
@@ -3178,7 +3123,14 @@ app.get('/dashboard/:guildId', requireAuth, (req, res) => {
   const statsConfig  = db.prepare('SELECT * FROM server_stats WHERE guild_id = ?').get(guildId);
   const votacaoConfig = db.prepare('SELECT * FROM votacao_config WHERE guild_id = ?').get(guildId);
   const sugestaoConfig = db.prepare('SELECT * FROM suggestion_config WHERE guild_id = ?').get(guildId);
-  const reactionRoles = db.prepare('SELECT * FROM reaction_roles WHERE guild_id = ? ORDER BY id DESC').all(guildId);
+  const rrPaineis = db.prepare('SELECT * FROM reaction_role_panels WHERE guild_id = ? ORDER BY id DESC').all(guildId);
+  const reactionRoles = rrPaineis.map(p => ({
+    ...p,
+    itens: db.prepare('SELECT * FROM reaction_roles WHERE guild_id = ? AND message_id = ?').all(guildId, p.message_id)
+  }));
+  const ticketTypes = db.prepare('SELECT * FROM ticket_types WHERE guild_id = ? ORDER BY order_num, id').all(guildId);
+  const savedEmbeds = db.prepare('SELECT * FROM saved_embeds WHERE guild_id = ? ORDER BY created_at DESC').all(guildId);
+  const staffRanking = getRankingStaff(guildId);
 
   // Stats rápidos
   const totalTickets  = db.prepare("SELECT COUNT(*) as c FROM tickets WHERE guild_id = ?").get(guildId)?.c || 0;
@@ -3197,8 +3149,23 @@ app.get('/dashboard/:guildId', requireAuth, (req, res) => {
     .filter(c => c.type === ChannelType.GuildCategory)
     .map(c => ({ id: c.id, name: c.name }));
 
+  // Lista de membros para dropdown de moderação (pesquisável)
+  let members = [];
+  try {
+    await guild.members.fetch();
+    members = guild.members.cache
+      .filter(m => !m.user.bot)
+      .map(m => ({ id: m.id, name: `${m.user.username}${m.nickname ? ' ('+m.nickname+')' : ''}` }))
+      .sort((a,b) => a.name.localeCompare(b.name));
+  } catch (e) {
+    members = guild.members.cache
+      .filter(m => !m.user.bot)
+      .map(m => ({ id: m.id, name: m.user.username }));
+  }
+
   res.send(renderGuildDashboard(req.session.user, guild, {
     ticketConfig, guildConfig, antispam, statsConfig, votacaoConfig, sugestaoConfig, reactionRoles,
+    ticketTypes, savedEmbeds, staffRanking, members,
     totalTickets, openTickets, totalWarns, totalSugs,
     channels, roles, categories
   }));
@@ -3360,11 +3327,17 @@ app.post('/api/:guildId/sugestao-config', requireAuth, (req, res) => {
   res.json({ ok: true, message: '✅ Configuração de sugestões guardada!' });
 });
 
-// ── Reaction Roles ──
+// ── Reaction Roles (100% Dashboard) ──
+// Fluxo: escolhes canal + escreves mensagem + defines 1 a 5 pares emoji->cargo.
+// O bot envia a mensagem exatamente como escrita e reage com os emojis escolhidos.
 app.get('/api/:guildId/reaction-roles', requireAuth, (req, res) => {
   const { guildId } = req.params;
-  const rr = db.prepare('SELECT * FROM reaction_roles WHERE guild_id = ? ORDER BY id DESC').all(guildId);
-  res.json(rr);
+  const paineis = db.prepare('SELECT * FROM reaction_role_panels WHERE guild_id = ? ORDER BY id DESC').all(guildId);
+  const paineisComItens = paineis.map(p => ({
+    ...p,
+    itens: db.prepare('SELECT * FROM reaction_roles WHERE guild_id = ? AND message_id = ?').all(guildId, p.message_id)
+  }));
+  res.json(paineisComItens);
 });
 
 app.post('/api/:guildId/reaction-roles', requireAuth, async (req, res) => {
@@ -3372,35 +3345,424 @@ app.post('/api/:guildId/reaction-roles', requireAuth, async (req, res) => {
   const guild = client.guilds.cache.get(guildId);
   if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
 
-  const { channel_id, message_id, emoji, role_id } = req.body;
-  if (!channel_id || !message_id || !emoji || !role_id) {
-    return res.status(400).json({ ok: false, message: 'Preenche todos os campos.' });
+  const { channel_id, conteudo } = req.body;
+  let emojis  = req.body['emoji[]'];
+  let cargos  = req.body['cargo[]'];
+  if (!emojis) emojis = [];
+  if (!cargos) cargos = [];
+  if (!Array.isArray(emojis)) emojis = [emojis];
+  if (!Array.isArray(cargos)) cargos = [cargos];
+
+  if (!channel_id || !conteudo || !conteudo.trim()) {
+    return res.status(400).json({ ok: false, message: 'Escolhe um canal e escreve a mensagem.' });
+  }
+
+  // Filtra pares válidos (emoji + cargo preenchidos)
+  const pares = [];
+  for (let i = 0; i < Math.max(emojis.length, cargos.length); i++) {
+    const emoji = (emojis[i] || '').trim();
+    const cargo = (cargos[i] || '').trim();
+    if (emoji && cargo) pares.push({ emoji, cargo });
+  }
+
+  if (pares.length < 1) return res.status(400).json({ ok: false, message: 'Define pelo menos 1 emoji com o respetivo cargo.' });
+  if (pares.length > 5) return res.status(400).json({ ok: false, message: 'O máximo são 5 emojis por mensagem.' });
+
+  // Emojis não podem repetir-se na mesma mensagem
+  const emojisUnicos = new Set(pares.map(p => p.emoji));
+  if (emojisUnicos.size !== pares.length) {
+    return res.status(400).json({ ok: false, message: 'Não podes repetir o mesmo emoji na mesma mensagem.' });
   }
 
   try {
     const canal = guild.channels.cache.get(channel_id);
     if (!canal) return res.status(404).json({ ok: false, message: 'Canal não encontrado.' });
 
-    const msg = await canal.messages.fetch(message_id);
-    await msg.react(emoji);
+    // O bot publica a mensagem exatamente como foi escrita no dashboard
+    const msg = await canal.send({ content: conteudo });
+
+    for (const par of pares) {
+      await msg.react(par.emoji);
+    }
 
     db.prepare(`
+      INSERT INTO reaction_role_panels (guild_id, channel_id, message_id, conteudo)
+      VALUES (?, ?, ?, ?)
+    `).run(guildId, channel_id, msg.id, conteudo);
+
+    const insertRR = db.prepare(`
       INSERT OR REPLACE INTO reaction_roles (guild_id, channel_id, message_id, emoji, role_id)
       VALUES (?, ?, ?, ?, ?)
-    `).run(guildId, channel_id, message_id, emoji, role_id);
+    `);
+    for (const par of pares) {
+      insertRR.run(guildId, channel_id, msg.id, par.emoji, par.cargo);
+    }
 
-    res.json({ ok: true, message: '✅ Reaction role adicionado!' });
+    res.json({ ok: true, message: '✅ Mensagem publicada e reaction roles configurados!' });
   } catch (e) {
     res.status(500).json({ ok: false, message: `Erro: ${e.message}` });
   }
 });
 
-app.post('/api/:guildId/reaction-roles/delete', requireAuth, (req, res) => {
+app.post('/api/:guildId/reaction-roles/delete', requireAuth, async (req, res) => {
+  const { guildId } = req.params;
+  const { message_id } = req.body;
+  const guild = client.guilds.cache.get(guildId);
+
+  const painel = db.prepare('SELECT * FROM reaction_role_panels WHERE guild_id = ? AND message_id = ?').get(guildId, message_id);
+
+  // Tenta apagar a mensagem original no Discord (se ainda existir)
+  if (guild && painel) {
+    try {
+      const canal = guild.channels.cache.get(painel.channel_id);
+      const msg = await canal?.messages.fetch(painel.message_id).catch(() => null);
+      if (msg) await msg.delete().catch(() => {});
+    } catch (_) {}
+  }
+
+  db.prepare('DELETE FROM reaction_roles WHERE guild_id = ? AND message_id = ?').run(guildId, message_id);
+  db.prepare('DELETE FROM reaction_role_panels WHERE guild_id = ? AND message_id = ?').run(guildId, message_id);
+
+  res.json({ ok: true, message: '✅ Painel de reaction roles removido!' });
+});
+
+// ── Moderação (Dashboard) ──
+app.get('/api/:guildId/members', requireAuth, async (req, res) => {
+  const { guildId } = req.params;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
+  try {
+    await guild.members.fetch();
+  } catch (_) {}
+  const members = guild.members.cache
+    .filter(m => !m.user.bot)
+    .map(m => ({ id: m.id, name: `${m.user.username}${m.nickname ? ' (' + m.nickname + ')' : ''}` }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  res.json(members);
+});
+
+app.post('/api/:guildId/mod/ban', requireAuth, async (req, res) => {
+  const { guildId } = req.params;
+  const { user_id, motivo, dias } = req.body;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
+  if (!user_id) return res.status(400).json({ ok: false, message: 'Escolhe um membro.' });
+
+  try {
+    const target = await guild.members.fetch(user_id).catch(() => null);
+    if (!target) return res.status(404).json({ ok: false, message: 'Membro não encontrado.' });
+    if (!target.bannable) return res.status(400).json({ ok: false, message: 'Não é possível banir este membro (cargo demasiado alto).' });
+
+    const razao = motivo || 'Sem motivo especificado';
+    await target.ban({ reason: razao, deleteMessageDays: parseInt(dias) || 0 });
+    logMod(guildId, 'BAN', target.id, req.session.user.id, razao);
+
+    const embed = embedPadrao('🔨 Utilizador Banido (via Dashboard)', `**Utilizador:** <@${target.id}> (\`${target.user.tag}\`)\n**Moderador:** ${req.session.user.username} (dashboard)\n**Motivo:** ${razao}`, CONFIG.COR_ERRO);
+    await sendLog(guild, embed);
+
+    res.json({ ok: true, message: `✅ ${target.user.tag} foi banido.` });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: `Erro: ${e.message}` });
+  }
+});
+
+app.post('/api/:guildId/mod/unban', requireAuth, async (req, res) => {
+  const { guildId } = req.params;
+  const { user_id, motivo } = req.body;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
+  if (!user_id) return res.status(400).json({ ok: false, message: 'Indica o ID do utilizador.' });
+
+  try {
+    const razao = motivo || 'Sem motivo especificado';
+    await guild.members.unban(user_id, razao);
+    logMod(guildId, 'UNBAN', user_id, req.session.user.id, razao);
+    const embed = embedPadrao('✅ Ban Removido (via Dashboard)', `**ID:** \`${user_id}\`\n**Moderador:** ${req.session.user.username} (dashboard)\n**Motivo:** ${razao}`, CONFIG.COR_SUCESSO);
+    await sendLog(guild, embed);
+    res.json({ ok: true, message: '✅ Ban removido.' });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: `Erro: ${e.message}` });
+  }
+});
+
+app.post('/api/:guildId/mod/kick', requireAuth, async (req, res) => {
+  const { guildId } = req.params;
+  const { user_id, motivo } = req.body;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
+  if (!user_id) return res.status(400).json({ ok: false, message: 'Escolhe um membro.' });
+
+  try {
+    const target = await guild.members.fetch(user_id).catch(() => null);
+    if (!target) return res.status(404).json({ ok: false, message: 'Membro não encontrado.' });
+    if (!target.kickable) return res.status(400).json({ ok: false, message: 'Não é possível expulsar este membro.' });
+
+    const razao = motivo || 'Sem motivo especificado';
+    await target.kick(razao);
+    logMod(guildId, 'KICK', target.id, req.session.user.id, razao);
+    const embed = embedPadrao('👢 Utilizador Expulso (via Dashboard)', `**Utilizador:** <@${target.id}>\n**Moderador:** ${req.session.user.username} (dashboard)\n**Motivo:** ${razao}`, CONFIG.COR_ERRO);
+    await sendLog(guild, embed);
+
+    res.json({ ok: true, message: `✅ ${target.user.tag} foi expulso.` });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: `Erro: ${e.message}` });
+  }
+});
+
+app.post('/api/:guildId/mod/timeout', requireAuth, async (req, res) => {
+  const { guildId } = req.params;
+  const { user_id, duracao, motivo } = req.body;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
+  if (!user_id) return res.status(400).json({ ok: false, message: 'Escolhe um membro.' });
+
+  const durMs = parseDuration(duracao);
+  if (!durMs) return res.status(400).json({ ok: false, message: 'Duração inválida. Usa por exemplo: 10m, 2h, 1d.' });
+
+  try {
+    const target = await guild.members.fetch(user_id).catch(() => null);
+    if (!target) return res.status(404).json({ ok: false, message: 'Membro não encontrado.' });
+    if (!target.moderatable) return res.status(400).json({ ok: false, message: 'Não é possível silenciar este membro.' });
+
+    const razao = motivo || 'Sem motivo especificado';
+    await target.timeout(durMs, razao);
+    logMod(guildId, 'TIMEOUT', target.id, req.session.user.id, razao, duracao);
+    const embed = embedPadrao('🔇 Utilizador Silenciado (via Dashboard)', `**Utilizador:** <@${target.id}>\n**Duração:** ${formatDuration(durMs)}\n**Moderador:** ${req.session.user.username} (dashboard)\n**Motivo:** ${razao}`, CONFIG.COR_AVISO);
+    await sendLog(guild, embed);
+
+    res.json({ ok: true, message: `✅ ${target.user.tag} foi silenciado por ${formatDuration(durMs)}.` });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: `Erro: ${e.message}` });
+  }
+});
+
+app.post('/api/:guildId/mod/untimeout', requireAuth, async (req, res) => {
+  const { guildId } = req.params;
+  const { user_id, motivo } = req.body;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
+  if (!user_id) return res.status(400).json({ ok: false, message: 'Escolhe um membro.' });
+
+  try {
+    const target = await guild.members.fetch(user_id).catch(() => null);
+    if (!target) return res.status(404).json({ ok: false, message: 'Membro não encontrado.' });
+
+    const razao = motivo || 'Sem motivo especificado';
+    await target.timeout(null, razao);
+    logMod(guildId, 'UNTIMEOUT', target.id, req.session.user.id, razao);
+    const embed = embedPadrao('🔊 Silêncio Removido (via Dashboard)', `**Utilizador:** <@${target.id}>\n**Moderador:** ${req.session.user.username} (dashboard)\n**Motivo:** ${razao}`, CONFIG.COR_SUCESSO);
+    await sendLog(guild, embed);
+
+    res.json({ ok: true, message: `✅ Silêncio removido de ${target.user.tag}.` });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: `Erro: ${e.message}` });
+  }
+});
+
+app.post('/api/:guildId/mod/warn', requireAuth, async (req, res) => {
+  const { guildId } = req.params;
+  const { user_id, motivo } = req.body;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
+  if (!user_id || !motivo) return res.status(400).json({ ok: false, message: 'Escolhe um membro e escreve o motivo.' });
+
+  try {
+    const target = await guild.members.fetch(user_id).catch(() => null);
+    if (!target) return res.status(404).json({ ok: false, message: 'Membro não encontrado.' });
+
+    db.prepare('INSERT INTO warns (guild_id, user_id, mod_id, reason) VALUES (?, ?, ?, ?)').run(guildId, target.id, req.session.user.id, motivo);
+    const total = db.prepare('SELECT COUNT(*) as c FROM warns WHERE guild_id = ? AND user_id = ?').get(guildId, target.id).c;
+    logMod(guildId, 'WARN', target.id, req.session.user.id, motivo);
+
+    const embed = embedPadrao('⚠️ Utilizador Avisado (via Dashboard)', `**Utilizador:** <@${target.id}>\n**Moderador:** ${req.session.user.username} (dashboard)\n**Motivo:** ${motivo}\n**Total de avisos:** ${total}`, CONFIG.COR_AVISO);
+    await sendLog(guild, embed);
+    try { await target.send({ embeds: [embedPadrao('⚠️ Recebeste um aviso', `**Servidor:** ${guild.name}\n**Motivo:** ${motivo}\n**Avisos totais:** ${total}`, CONFIG.COR_AVISO)] }); } catch (_) {}
+
+    res.json({ ok: true, message: `✅ ${target.user.tag} foi avisado. Total: ${total}.` });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: `Erro: ${e.message}` });
+  }
+});
+
+app.post('/api/:guildId/mod/clearwarns', requireAuth, (req, res) => {
+  const { guildId } = req.params;
+  const { user_id } = req.body;
+  if (!user_id) return res.status(400).json({ ok: false, message: 'Escolhe um membro.' });
+
+  const result = db.prepare('DELETE FROM warns WHERE guild_id = ? AND user_id = ?').run(guildId, user_id);
+  res.json({ ok: true, message: `✅ ${result.changes} aviso(s) removido(s).` });
+});
+
+app.post('/api/:guildId/mod/limpar', requireAuth, async (req, res) => {
+  const { guildId } = req.params;
+  const { channel_id, quantidade, user_id } = req.body;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
+  if (!channel_id) return res.status(400).json({ ok: false, message: 'Escolhe um canal.' });
+
+  const qtd = Math.min(Math.max(parseInt(quantidade) || 10, 1), 100);
+
+  try {
+    const canal = guild.channels.cache.get(channel_id);
+    if (!canal) return res.status(404).json({ ok: false, message: 'Canal não encontrado.' });
+
+    let msgs = await canal.messages.fetch({ limit: 100 });
+    if (user_id) msgs = msgs.filter(m => m.author.id === user_id);
+    msgs = [...msgs.values()].slice(0, qtd);
+
+    const apagadas = await canal.bulkDelete(msgs, true);
+    const embed = embedPadrao('🗑️ Mensagens Apagadas (via Dashboard)', `**${apagadas.size}** mensagem(ns) apagada(s) em #${canal.name}.`, CONFIG.COR_SUCESSO);
+    await sendLog(guild, embed);
+
+    res.json({ ok: true, message: `✅ ${apagadas.size} mensagem(ns) apagada(s).` });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: `Erro: ${e.message}` });
+  }
+});
+
+// ── Tipos de Ticket (Dashboard) ──
+app.get('/api/:guildId/ticket-types', requireAuth, (req, res) => {
+  const { guildId } = req.params;
+  const tipos = db.prepare('SELECT * FROM ticket_types WHERE guild_id = ? ORDER BY order_num, id').all(guildId);
+  res.json(tipos);
+});
+
+app.post('/api/:guildId/ticket-types', requireAuth, (req, res) => {
+  const { guildId } = req.params;
+  const { label, description, emoji, category_id, support_role, color } = req.body;
+  if (!label) return res.status(400).json({ ok: false, message: 'Indica o nome do tipo de ticket.' });
+
+  const maxOrder = db.prepare('SELECT MAX(order_num) as m FROM ticket_types WHERE guild_id = ?').get(guildId)?.m || 0;
+
+  db.prepare(`
+    INSERT INTO ticket_types (guild_id, label, description, emoji, category_id, support_role, color, order_num)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(guildId, label, description || null, emoji || '🎫', category_id || null, support_role || null, color || CONFIG.COR_PRINCIPAL, maxOrder + 1);
+
+  res.json({ ok: true, message: '✅ Tipo de ticket adicionado!' });
+});
+
+app.post('/api/:guildId/ticket-types/delete', requireAuth, (req, res) => {
   const { guildId } = req.params;
   const { id } = req.body;
+  db.prepare('DELETE FROM ticket_types WHERE id = ? AND guild_id = ?').run(id, guildId);
+  res.json({ ok: true, message: '✅ Tipo de ticket removido!' });
+});
 
-  db.prepare('DELETE FROM reaction_roles WHERE id = ? AND guild_id = ?').run(id, guildId);
-  res.json({ ok: true, message: '✅ Reaction role removido!' });
+// ── Embeds (Dashboard) ──
+app.get('/api/:guildId/embeds', requireAuth, (req, res) => {
+  const { guildId } = req.params;
+  const embeds = db.prepare('SELECT * FROM saved_embeds WHERE guild_id = ? ORDER BY created_at DESC').all(guildId);
+  res.json(embeds);
+});
+
+app.post('/api/:guildId/embeds/enviar', requireAuth, async (req, res) => {
+  const { guildId } = req.params;
+  const { channel_id, titulo, descricao, cor, imagem, thumbnail, footer, guardar_como } = req.body;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
+  if (!channel_id || !titulo || !descricao) return res.status(400).json({ ok: false, message: 'Preenche canal, título e descrição.' });
+
+  try {
+    const canal = guild.channels.cache.get(channel_id);
+    if (!canal) return res.status(404).json({ ok: false, message: 'Canal não encontrado.' });
+
+    const embed = new EmbedBuilder().setTitle(titulo).setDescription(descricao).setColor(cor || CONFIG.COR_PRINCIPAL).setTimestamp();
+    if (imagem)    embed.setImage(imagem);
+    if (thumbnail) embed.setThumbnail(thumbnail);
+    if (footer)    embed.setFooter({ text: footer });
+
+    await canal.send({ embeds: [embed] });
+
+    if (guardar_como && guardar_como.trim()) {
+      const data = JSON.stringify({ title: titulo, description: descricao, color: cor || CONFIG.COR_PRINCIPAL, image: imagem || null, thumbnail: thumbnail || null, footer: footer || null });
+      db.prepare('INSERT INTO saved_embeds (guild_id, name, data, created_by) VALUES (?, ?, ?, ?)').run(guildId, guardar_como.trim(), data, req.session.user.id);
+    }
+
+    res.json({ ok: true, message: '✅ Embed enviado!' });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: `Erro: ${e.message}` });
+  }
+});
+
+app.post('/api/:guildId/embeds/guardar', requireAuth, (req, res) => {
+  const { guildId } = req.params;
+  const { nome, titulo, descricao, cor, imagem, thumbnail, footer } = req.body;
+  if (!nome || !titulo || !descricao) return res.status(400).json({ ok: false, message: 'Preenche nome, título e descrição.' });
+
+  const data = JSON.stringify({ title: titulo, description: descricao, color: cor || CONFIG.COR_PRINCIPAL, image: imagem || null, thumbnail: thumbnail || null, footer: footer || null });
+  db.prepare('INSERT INTO saved_embeds (guild_id, name, data, created_by) VALUES (?, ?, ?, ?)').run(guildId, nome, data, req.session.user.id);
+
+  res.json({ ok: true, message: `✅ Embed "${nome}" guardado!` });
+});
+
+app.post('/api/:guildId/embeds/enviar-guardado', requireAuth, async (req, res) => {
+  const { guildId } = req.params;
+  const { id, channel_id } = req.body;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
+
+  const saved = db.prepare('SELECT * FROM saved_embeds WHERE id = ? AND guild_id = ?').get(id, guildId);
+  if (!saved) return res.status(404).json({ ok: false, message: 'Embed não encontrado.' });
+
+  try {
+    const canal = guild.channels.cache.get(channel_id);
+    if (!canal) return res.status(404).json({ ok: false, message: 'Canal não encontrado.' });
+
+    const data  = JSON.parse(saved.data);
+    const embed = new EmbedBuilder().setTitle(data.title).setDescription(data.description).setColor(data.color).setTimestamp();
+    if (data.image)     embed.setImage(data.image);
+    if (data.thumbnail) embed.setThumbnail(data.thumbnail);
+    if (data.footer)    embed.setFooter({ text: data.footer });
+
+    await canal.send({ embeds: [embed] });
+    res.json({ ok: true, message: '✅ Embed enviado!' });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: `Erro: ${e.message}` });
+  }
+});
+
+app.post('/api/:guildId/embeds/delete', requireAuth, (req, res) => {
+  const { guildId } = req.params;
+  const { id } = req.body;
+  db.prepare('DELETE FROM saved_embeds WHERE id = ? AND guild_id = ?').run(id, guildId);
+  res.json({ ok: true, message: '✅ Embed removido!' });
+});
+
+// ── Staff (Dashboard) ──
+app.get('/api/:guildId/staff/ranking', requireAuth, (req, res) => {
+  const { guildId } = req.params;
+  res.json(getRankingStaff(guildId));
+});
+
+app.get('/api/:guildId/staff/historico/:staffId', requireAuth, (req, res) => {
+  const { guildId, staffId } = req.params;
+  const historico = db.prepare('SELECT * FROM staff_ratings WHERE guild_id = ? AND staff_id = ? ORDER BY created_at DESC LIMIT 20').all(guildId, staffId);
+  const stats = db.prepare('SELECT AVG(rating) as media, COUNT(*) as total, MIN(rating) as min, MAX(rating) as max FROM staff_ratings WHERE guild_id = ? AND staff_id = ?').get(guildId, staffId);
+  res.json({ historico, stats });
+});
+
+app.post('/api/:guildId/staff/avaliar', requireAuth, async (req, res) => {
+  const { guildId } = req.params;
+  const { staff_id, rating, comment } = req.body;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.status(404).json({ ok: false, message: 'Servidor não encontrado.' });
+  if (!staff_id || !rating) return res.status(400).json({ ok: false, message: 'Escolhe um membro da staff e uma classificação.' });
+
+  const nota = parseInt(rating);
+  if (nota < 1 || nota > 5) return res.status(400).json({ ok: false, message: 'A classificação tem de ser entre 1 e 5.' });
+
+  db.prepare('INSERT INTO staff_ratings (guild_id, staff_id, user_id, rating, comment) VALUES (?, ?, ?, ?, ?)')
+    .run(guildId, staff_id, req.session.user.id, nota, comment || null);
+
+  res.json({ ok: true, message: '✅ Avaliação registada!' });
+});
+
+app.post('/api/:guildId/staff/remover-avaliacao', requireAuth, (req, res) => {
+  const { guildId } = req.params;
+  const { id } = req.body;
+  db.prepare('DELETE FROM staff_ratings WHERE id = ? AND guild_id = ?').run(id, guildId);
+  res.json({ ok: true, message: '✅ Avaliação removida!' });
 });
 
 // ── Votação ──
@@ -3531,6 +3893,7 @@ const dashboardCSS = `
   .btn-primary:hover { background: var(--accent2); }
   .btn-success { background: var(--success); color: #000; }
   .btn-danger  { background: var(--danger); color: #fff; }
+  .btn-warning { background: var(--warning); color: #1a1a1a; }
   .btn-secondary { background: var(--bg3); color: var(--text); border: 1px solid var(--border); }
   .tabs { display: flex; gap: 4px; margin-bottom: 24px; border-bottom: 1px solid var(--border); }
   .tab { padding: 10px 18px; border-radius: 8px 8px 0 0; cursor: pointer; font-weight: 600; font-size: 0.9rem; color: var(--text2); background: transparent; border: none; transition: all 0.2s; }
@@ -3611,6 +3974,15 @@ const dashboardJS = `
   document.addEventListener('DOMContentLoaded', initTabs);
 
   // ── Reaction Roles ──
+  function addRrParLinha() {
+    const container = document.getElementById('rr-pares');
+    const linhas = container.querySelectorAll('.rr-par');
+    if (linhas.length >= 5) { toast('❌ Máximo de 5 emojis por mensagem.', 'error'); return; }
+    const nova = linhas[0].cloneNode(true);
+    nova.querySelectorAll('input').forEach(i => i.value = '');
+    nova.querySelectorAll('select').forEach(s => s.value = '');
+    container.appendChild(nova);
+  }
   async function addReactionRole(guildId) {
     const form = document.getElementById('form-rr-add');
     const data = new FormData(form);
@@ -3624,11 +3996,11 @@ const dashboardJS = `
       if (json.ok) setTimeout(() => location.reload(), 800);
     } catch(e) { toast('❌ Erro de ligação', 'error'); }
   }
-  async function removeReactionRole(guildId, id) {
-    if (!confirm('Remover este reaction role?')) return;
+  async function removeReactionRole(guildId, messageId) {
+    if (!confirm('Remover este painel de reaction roles? A mensagem original também será apagada do Discord.')) return;
     try {
       const res = await fetch('/api/' + guildId + '/reaction-roles/delete', {
-        method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: 'id=' + id
+        method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: 'message_id=' + encodeURIComponent(messageId)
       });
       const json = await res.json();
       toast(json.ok ? json.message : '❌ Erro', json.ok ? 'success' : 'error');
@@ -3689,6 +4061,102 @@ const dashboardJS = `
       const json = await res.json();
       toast(json.ok ? json.message : '❌ Erro', json.ok ? 'success' : 'error');
       if (json.ok) setTimeout(() => location.reload(), 800);
+    } catch(e) { toast('❌ Erro de ligação', 'error'); }
+  }
+
+  // ── Moderação ──
+  async function modAction(guildId, action, formId) {
+    const form = document.getElementById(formId);
+    const data = new FormData(form);
+    const body = new URLSearchParams(data).toString();
+    if (['ban','kick','timeout'].includes(action) && !confirm('Confirmas esta ação de moderação?')) return;
+    try {
+      const res = await fetch('/api/' + guildId + '/mod/' + action, {
+        method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body
+      });
+      const json = await res.json();
+      toast(json.ok ? json.message : ('❌ ' + json.message), json.ok ? 'success' : 'error');
+      if (json.ok) form.reset();
+    } catch(e) { toast('❌ Erro de ligação', 'error'); }
+  }
+
+  // ── Tipos de Ticket ──
+  async function addTicketType(guildId) {
+    const form = document.getElementById('form-ticket-type');
+    const data = new FormData(form);
+    const body = new URLSearchParams(data).toString();
+    try {
+      const res = await fetch('/api/' + guildId + '/ticket-types', {
+        method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body
+      });
+      const json = await res.json();
+      toast(json.ok ? json.message : ('❌ ' + json.message), json.ok ? 'success' : 'error');
+      if (json.ok) setTimeout(() => location.reload(), 800);
+    } catch(e) { toast('❌ Erro de ligação', 'error'); }
+  }
+  async function removeTicketType(guildId, id) {
+    if (!confirm('Remover este tipo de ticket?')) return;
+    try {
+      const res = await fetch('/api/' + guildId + '/ticket-types/delete', {
+        method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: 'id=' + id
+      });
+      const json = await res.json();
+      toast(json.ok ? json.message : '❌ Erro', json.ok ? 'success' : 'error');
+      if (json.ok) setTimeout(() => location.reload(), 800);
+    } catch(e) { toast('❌ Erro de ligação', 'error'); }
+  }
+
+  // ── Embeds ──
+  async function enviarEmbed(guildId) {
+    const form = document.getElementById('form-embed-send');
+    const data = new FormData(form);
+    const body = new URLSearchParams(data).toString();
+    try {
+      const res = await fetch('/api/' + guildId + '/embeds/enviar', {
+        method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body
+      });
+      const json = await res.json();
+      toast(json.ok ? json.message : ('❌ ' + json.message), json.ok ? 'success' : 'error');
+      if (json.ok) setTimeout(() => location.reload(), 1000);
+    } catch(e) { toast('❌ Erro de ligação', 'error'); }
+  }
+  async function enviarEmbedGuardado(guildId, id) {
+    const sel = document.getElementById('embed-canal-' + id);
+    const channel_id = sel ? sel.value : '';
+    if (!channel_id) { toast('❌ Escolhe um canal primeiro.', 'error'); return; }
+    try {
+      const res = await fetch('/api/' + guildId + '/embeds/enviar-guardado', {
+        method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'},
+        body: 'id=' + id + '&channel_id=' + channel_id
+      });
+      const json = await res.json();
+      toast(json.ok ? json.message : ('❌ ' + json.message), json.ok ? 'success' : 'error');
+    } catch(e) { toast('❌ Erro de ligação', 'error'); }
+  }
+  async function removeEmbed(guildId, id) {
+    if (!confirm('Remover este embed guardado?')) return;
+    try {
+      const res = await fetch('/api/' + guildId + '/embeds/delete', {
+        method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: 'id=' + id
+      });
+      const json = await res.json();
+      toast(json.ok ? json.message : '❌ Erro', json.ok ? 'success' : 'error');
+      if (json.ok) setTimeout(() => location.reload(), 800);
+    } catch(e) { toast('❌ Erro de ligação', 'error'); }
+  }
+
+  // ── Staff ──
+  async function avaliarStaff(guildId) {
+    const form = document.getElementById('form-staff-avaliar');
+    const data = new FormData(form);
+    const body = new URLSearchParams(data).toString();
+    try {
+      const res = await fetch('/api/' + guildId + '/staff/avaliar', {
+        method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body
+      });
+      const json = await res.json();
+      toast(json.ok ? json.message : ('❌ ' + json.message), json.ok ? 'success' : 'error');
+      if (json.ok) { form.reset(); if (typeof loadRatings === 'function') loadRatings(); }
     } catch(e) { toast('❌ Erro de ligação', 'error'); }
   }
 `;
@@ -3795,12 +4263,18 @@ function renderDashboard(user, selectedGuild, error = null) {
 
 /** Renderiza o dashboard completo de um servidor */
 function renderGuildDashboard(user, guild, data) {
-  const { ticketConfig, guildConfig, antispam, statsConfig, votacaoConfig, sugestaoConfig, reactionRoles, totalTickets, openTickets, totalWarns, totalSugs, channels, roles, categories } = data;
+  const { ticketConfig, guildConfig, antispam, statsConfig, votacaoConfig, sugestaoConfig, reactionRoles, ticketTypes, savedEmbeds, staffRanking, members, totalTickets, openTickets, totalWarns, totalSugs, channels, roles, categories } = data;
 
   const makeSelect = (name, options, current, placeholder='Seleciona...') =>
     `<select name="${name}" id="${name}">
       <option value="">— ${placeholder} —</option>
       ${options.map(o => `<option value="${o.id}" ${o.id === current ? 'selected' : ''}>${o.name}</option>`).join('')}
+    </select>`;
+
+  const makeMemberSelect = (name, current) =>
+    `<select name="${name}" id="${name}">
+      <option value="">— Escolhe um membro —</option>
+      ${members.map(m => `<option value="${m.id}" ${m.id === current ? 'selected' : ''}>${m.name}</option>`).join('')}
     </select>`;
 
   return `<!DOCTYPE html>
@@ -3833,9 +4307,11 @@ function renderGuildDashboard(user, guild, data) {
     ${[
       ['📊','Visão Geral','overview'],
       ['🎫','Tickets','tickets'],
+      ['🔨','Moderação','mod_tab'],
       ['👋','Boas-vindas','welcome'],
       ['🛡️','AntiSpam','antispam'],
       ['📋','Logs','logs'],
+      ['🎨','Embeds','embeds_tab'],
       ['⭐','Avaliações Staff','ratings'],
       ['💡','Sugestões','suggestions_tab'],
       ['🎭','Reaction Roles','rr_tab'],
@@ -3902,6 +4378,211 @@ function renderGuildDashboard(user, guild, data) {
           </div>
           <button type="button" class="btn btn-primary" onclick="saveConfig('${guild.id}','ticket-config','form-tickets')">💾 Guardar Configuração</button>
         </form>
+      </div>
+
+      <div class="card" style="margin-top:20px">
+        <h2>🏷️ Tipos de Ticket</h2>
+        <p style="color:var(--text2);font-size:0.85rem;margin-bottom:16px">Cria diferentes tipos de ticket (ex: Suporte, Denúncia, Parceria). Se houver pelo menos 1 tipo, o painel de tickets mostra um menu de seleção em vez de um botão simples.</p>
+        <form id="form-ticket-type">
+          <div class="grid-2">
+            <div class="form-group">
+              <label>Nome do Tipo</label>
+              <input type="text" name="label" placeholder="Ex: Suporte Técnico" maxlength="80">
+            </div>
+            <div class="form-group">
+              <label>Emoji</label>
+              <input type="text" name="emoji" placeholder="Ex: 🎫" maxlength="10">
+            </div>
+            <div class="form-group">
+              <label>Categoria (onde o canal é criado)</label>
+              ${makeSelect('category_id', categories, '', 'Usar a categoria padrão')}
+            </div>
+            <div class="form-group">
+              <label>Cargo de Suporte deste tipo</label>
+              ${makeSelect('support_role', roles, '', 'Usar o cargo padrão')}
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Descrição (aparece no menu)</label>
+            <input type="text" name="description" placeholder="Ex: Para problemas técnicos com a tua conta" maxlength="100">
+          </div>
+          <button type="button" class="btn btn-primary" onclick="addTicketType('${guild.id}')">➕ Adicionar Tipo</button>
+        </form>
+        <div id="ticket-types-table" style="margin-top:16px">
+          ${ticketTypes.length ? `
+            <table class="data-table">
+              <thead><tr><th>Emoji</th><th>Nome</th><th>Descrição</th><th></th></tr></thead>
+              <tbody>
+                ${ticketTypes.map(t => `
+                  <tr>
+                    <td>${t.emoji || '🎫'}</td>
+                    <td>${t.label}</td>
+                    <td style="color:var(--text2)">${t.description || '—'}</td>
+                    <td><button type="button" class="btn btn-danger" style="padding:4px 10px;font-size:0.8rem" onclick="removeTicketType('${guild.id}', ${t.id})">🗑️</button></td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          ` : `<p style="color:var(--text2)">Nenhum tipo de ticket criado ainda — o painel usará um botão simples.</p>`}
+        </div>
+      </div>
+    </div>
+
+    <!-- MODERAÇÃO -->
+    <div id="mod_tab" class="section" style="display:none">
+      <div class="section-title"><span>🔨</span> Moderação</div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h2>🔨 Banir</h2>
+          <form id="form-mod-ban">
+            <div class="form-group"><label>Membro</label>${makeMemberSelect('user_id')}</div>
+            <div class="form-group"><label>Motivo</label><input type="text" name="motivo" placeholder="Motivo do ban"></div>
+            <div class="form-group"><label>Apagar mensagens (dias)</label><input type="number" name="dias" value="0" min="0" max="7"></div>
+            <button type="button" class="btn btn-danger" onclick="modAction('${guild.id}','ban','form-mod-ban')">🔨 Banir</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>✅ Remover Ban</h2>
+          <form id="form-mod-unban">
+            <div class="form-group"><label>ID do Utilizador</label><input type="text" name="user_id" placeholder="ID do utilizador banido"></div>
+            <div class="form-group"><label>Motivo</label><input type="text" name="motivo" placeholder="Motivo"></div>
+            <button type="button" class="btn btn-primary" onclick="modAction('${guild.id}','unban','form-mod-unban')">✅ Remover Ban</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>👢 Expulsar</h2>
+          <form id="form-mod-kick">
+            <div class="form-group"><label>Membro</label>${makeMemberSelect('user_id')}</div>
+            <div class="form-group"><label>Motivo</label><input type="text" name="motivo" placeholder="Motivo da expulsão"></div>
+            <button type="button" class="btn btn-danger" onclick="modAction('${guild.id}','kick','form-mod-kick')">👢 Expulsar</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>🔇 Silenciar (Timeout)</h2>
+          <form id="form-mod-timeout">
+            <div class="form-group"><label>Membro</label>${makeMemberSelect('user_id')}</div>
+            <div class="form-group"><label>Duração</label><input type="text" name="duracao" placeholder="Ex: 10m, 2h, 1d"></div>
+            <div class="form-group"><label>Motivo</label><input type="text" name="motivo" placeholder="Motivo"></div>
+            <button type="button" class="btn btn-warning" onclick="modAction('${guild.id}','timeout','form-mod-timeout')">🔇 Silenciar</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>🔊 Remover Silêncio</h2>
+          <form id="form-mod-untimeout">
+            <div class="form-group"><label>Membro</label>${makeMemberSelect('user_id')}</div>
+            <div class="form-group"><label>Motivo</label><input type="text" name="motivo" placeholder="Motivo"></div>
+            <button type="button" class="btn btn-primary" onclick="modAction('${guild.id}','untimeout','form-mod-untimeout')">🔊 Remover Silêncio</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>⚠️ Avisar</h2>
+          <form id="form-mod-warn">
+            <div class="form-group"><label>Membro</label>${makeMemberSelect('user_id')}</div>
+            <div class="form-group"><label>Motivo</label><input type="text" name="motivo" placeholder="Motivo do aviso"></div>
+            <button type="button" class="btn btn-warning" onclick="modAction('${guild.id}','warn','form-mod-warn')">⚠️ Avisar</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>🧹 Limpar Avisos</h2>
+          <form id="form-mod-clearwarns">
+            <div class="form-group"><label>Membro</label>${makeMemberSelect('user_id')}</div>
+            <button type="button" class="btn btn-danger" onclick="modAction('${guild.id}','clearwarns','form-mod-clearwarns')">🧹 Limpar Avisos</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>🗑️ Limpar Mensagens</h2>
+          <form id="form-mod-limpar">
+            <div class="form-group"><label>Canal</label>${makeSelect('channel_id', channels, '', 'Canal')}</div>
+            <div class="form-group"><label>Quantidade (1-100)</label><input type="number" name="quantidade" value="10" min="1" max="100"></div>
+            <div class="form-group"><label>Só de um Membro (opcional)</label>${makeMemberSelect('user_id')}</div>
+            <button type="button" class="btn btn-danger" onclick="modAction('${guild.id}','limpar','form-mod-limpar')">🗑️ Limpar Mensagens</button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <!-- EMBEDS -->
+    <div id="embeds_tab" class="section" style="display:none">
+      <div class="section-title"><span>🎨</span> Embeds</div>
+      <div class="card">
+        <h2>➕ Criar / Enviar Embed</h2>
+        <form id="form-embed-send">
+          <div class="grid-2">
+            <div class="form-group">
+              <label>Canal onde Enviar</label>
+              ${makeSelect('channel_id', channels, '', 'Canal')}
+            </div>
+            <div class="form-group">
+              <label>Cor (hex)</label>
+              <input type="text" name="cor" value="${CONFIG.COR_PRINCIPAL}" placeholder="#5865F2">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Título</label>
+            <input type="text" name="titulo" placeholder="Título do embed" maxlength="256">
+          </div>
+          <div class="form-group">
+            <label>Descrição</label>
+            <textarea name="descricao" rows="4" placeholder="Conteúdo do embed"></textarea>
+          </div>
+          <div class="grid-2">
+            <div class="form-group">
+              <label>URL da Imagem (opcional)</label>
+              <input type="text" name="imagem" placeholder="https://...">
+            </div>
+            <div class="form-group">
+              <label>URL da Thumbnail (opcional)</label>
+              <input type="text" name="thumbnail" placeholder="https://...">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Rodapé (opcional)</label>
+            <input type="text" name="footer" placeholder="Texto do rodapé">
+          </div>
+          <div class="form-group">
+            <label>Guardar como (opcional — dá-lhe um nome para reutilizares depois)</label>
+            <input type="text" name="guardar_como" placeholder="Ex: regras-servidor">
+          </div>
+          <button type="button" class="btn btn-primary" onclick="enviarEmbed('${guild.id}')">🚀 Enviar Embed</button>
+        </form>
+      </div>
+
+      <div class="card" style="margin-top:20px">
+        <h2>📋 Embeds Guardados</h2>
+        <div id="embeds-table">
+          ${savedEmbeds.length ? `
+            <table class="data-table">
+              <thead><tr><th>Nome</th><th>Título</th><th>Enviar para</th><th></th></tr></thead>
+              <tbody>
+                ${savedEmbeds.map(e => {
+                  let titulo = '—';
+                  try { titulo = JSON.parse(e.data).title || '—'; } catch(_) {}
+                  return `
+                  <tr>
+                    <td>${e.name}</td>
+                    <td>${titulo}</td>
+                    <td>
+                      <select id="embed-canal-${e.id}" style="width:auto;display:inline-block;padding:4px 8px;font-size:0.8rem">
+                        <option value="">Canal...</option>
+                        ${channels.map(c => `<option value="${c.id}">#${c.name}</option>`).join('')}
+                      </select>
+                      <button type="button" class="btn btn-primary" style="padding:4px 10px;font-size:0.8rem" onclick="enviarEmbedGuardado('${guild.id}', ${e.id})">📤</button>
+                    </td>
+                    <td><button type="button" class="btn btn-danger" style="padding:4px 10px;font-size:0.8rem" onclick="removeEmbed('${guild.id}', ${e.id})">🗑️</button></td>
+                  </tr>
+                `}).join('')}
+              </tbody>
+            </table>
+          ` : `<p style="color:var(--text2)">Nenhum embed guardado ainda.</p>`}
+        </div>
       </div>
     </div>
 
@@ -3997,8 +4678,34 @@ function renderGuildDashboard(user, guild, data) {
 
     <!-- AVALIAÇÕES -->
     <div id="ratings" class="section" style="display:none">
-      <div class="section-title"><span>⭐</span> Ranking de Staff</div>
+      <div class="section-title"><span>⭐</span> Avaliações de Staff</div>
+
       <div class="card">
+        <h2>➕ Avaliar Membro da Staff</h2>
+        <form id="form-staff-avaliar">
+          <div class="grid-2">
+            <div class="form-group"><label>Membro da Staff</label>${makeMemberSelect('staff_id')}</div>
+            <div class="form-group">
+              <label>Classificação</label>
+              <select name="rating">
+                <option value="5">⭐⭐⭐⭐⭐ (5)</option>
+                <option value="4">⭐⭐⭐⭐ (4)</option>
+                <option value="3">⭐⭐⭐ (3)</option>
+                <option value="2">⭐⭐ (2)</option>
+                <option value="1">⭐ (1)</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Comentário (opcional)</label>
+            <textarea name="comment" rows="2" placeholder="Como correu o atendimento?"></textarea>
+          </div>
+          <button type="button" class="btn btn-primary" onclick="avaliarStaff('${guild.id}')">⭐ Enviar Avaliação</button>
+        </form>
+      </div>
+
+      <div class="card" style="margin-top:20px">
+        <h2>🏆 Ranking de Staff</h2>
         <div id="ratings-table">A carregar...</div>
       </div>
     </div>
@@ -4042,49 +4749,61 @@ function renderGuildDashboard(user, guild, data) {
     <div id="rr_tab" class="section" style="display:none">
       <div class="section-title"><span>🎭</span> Reaction Roles</div>
       <div class="card">
-        <h2>➕ Adicionar Reaction Role</h2>
-        <p style="color:var(--text2);font-size:0.85rem;margin-bottom:16px">A mensagem tem de já existir no canal escolhido. Copia o ID da mensagem com o modo de programador ativo no Discord.</p>
+        <h2>➕ Criar Novo Painel de Reaction Roles</h2>
+        <p style="color:var(--text2);font-size:0.85rem;margin-bottom:16px">
+          Escolhe o canal, escreve a mensagem e define entre 1 a 5 emojis, cada um associado a um cargo.
+          O bot publica exatamente a mensagem que escreveres nesse canal e reage automaticamente com os emojis escolhidos.
+          Quando alguém reagir, recebe o cargo correspondente — se remover a reação, perde o cargo.
+        </p>
         <form id="form-rr-add">
-          <div class="grid-2">
-            <div class="form-group">
-              <label>Canal da Mensagem</label>
-              ${makeSelect('channel_id', channels, '', 'Canal')}
-            </div>
-            <div class="form-group">
-              <label>ID da Mensagem</label>
-              <input type="text" name="message_id" placeholder="Ex: 123456789012345678">
-            </div>
-            <div class="form-group">
-              <label>Emoji</label>
-              <input type="text" name="emoji" placeholder="Ex: ✅ ou :nome_emoji:">
-            </div>
-            <div class="form-group">
-              <label>Cargo a Atribuir</label>
-              ${makeSelect('role_id', roles, '', 'Cargo')}
-            </div>
+          <div class="form-group">
+            <label>Canal onde publicar a mensagem</label>
+            ${makeSelect('channel_id', channels, '', 'Canal')}
           </div>
-          <button type="button" class="btn btn-primary" onclick="addReactionRole('${guild.id}')">➕ Adicionar</button>
+          <div class="form-group">
+            <label>Mensagem a publicar</label>
+            <textarea name="conteudo" rows="4" placeholder="Ex: Reage para escolheres os teus cargos!&#10;✅ - Anúncios&#10;🎮 - Gamer"></textarea>
+          </div>
+
+          <div class="form-group">
+            <label>Emojis e Cargos (mínimo 1, máximo 5)</label>
+            <div id="rr-pares">
+              <div class="grid-2 rr-par" style="margin-bottom:10px">
+                <input type="text" name="emoji[]" placeholder="Emoji, ex: ✅">
+                ${makeSelect('cargo[]', roles, '', 'Cargo')}
+              </div>
+            </div>
+            <button type="button" class="btn" style="margin-top:4px" onclick="addRrParLinha('${guild.id}')">➕ Adicionar outro emoji</button>
+          </div>
+
+          <button type="button" class="btn btn-primary" style="margin-top:16px" onclick="addReactionRole('${guild.id}')">🚀 Publicar Mensagem e Ativar Reaction Roles</button>
         </form>
       </div>
       <div class="card" style="margin-top:20px">
-        <h2>📋 Reaction Roles Configurados</h2>
+        <h2>📋 Painéis de Reaction Roles Configurados</h2>
         <div id="rr-table">
-          ${reactionRoles.length ? `
-            <table class="data-table">
-              <thead><tr><th>Emoji</th><th>Cargo</th><th>Canal</th><th>Mensagem</th><th></th></tr></thead>
-              <tbody>
-                ${reactionRoles.map(rr => `
-                  <tr>
-                    <td>${rr.emoji}</td>
-                    <td>${roles.find(r=>r.id===rr.role_id)?.name || rr.role_id}</td>
-                    <td>${channels.find(c=>c.id===rr.channel_id)?.name || rr.channel_id}</td>
-                    <td style="font-size:0.75rem;color:var(--text2)">${rr.message_id}</td>
-                    <td><button type="button" class="btn btn-danger" style="padding:4px 10px;font-size:0.8rem" onclick="removeReactionRole('${guild.id}', ${rr.id})">🗑️</button></td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-          ` : `<p style="color:var(--text2)">Ainda não há reaction roles configurados.</p>`}
+          ${reactionRoles.length ? reactionRoles.map(p => `
+            <div style="border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:14px">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+                <div>
+                  <div style="font-size:0.75rem;color:var(--text2);margin-bottom:4px">Canal: ${channels.find(c=>c.id===p.channel_id)?.name ? '#'+channels.find(c=>c.id===p.channel_id).name : p.channel_id}</div>
+                  <div style="white-space:pre-wrap;font-size:0.9rem;margin-bottom:8px">${(p.conteudo || '').replace(/</g,'&lt;')}</div>
+                </div>
+                <button type="button" class="btn btn-danger" style="padding:4px 10px;font-size:0.8rem;flex-shrink:0" onclick="removeReactionRole('${guild.id}', '${p.message_id}')">🗑️ Remover</button>
+              </div>
+              <table class="data-table" style="margin-top:6px">
+                <thead><tr><th>Emoji</th><th>Cargo</th></tr></thead>
+                <tbody>
+                  ${(p.itens || []).map(rr => `
+                    <tr>
+                      <td>${rr.emoji}</td>
+                      <td>${roles.find(r=>r.id===rr.role_id)?.name || rr.role_id}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          `).join('') : `<p style="color:var(--text2)">Ainda não há painéis de reaction roles configurados.</p>`}
         </div>
       </div>
     </div>
