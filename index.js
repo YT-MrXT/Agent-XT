@@ -539,6 +539,33 @@ async function gerarTranscript(channel) {
 // SISTEMA DE TICKETS
 // ============================
 
+/** Converte o nome de um tipo de ticket num slug válido para nome de canal (ex: "Carta de Condução" -> "carta-de-condução") */
+function slugifyTipoTicket(text) {
+  return (text || '')
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9\u00C0-\u017F-]/g, '')
+    .substring(0, 30) || 'ticket';
+}
+
+/** Devolve o ID do cargo de suporte efetivo de um ticket (tipo específico ou o padrão do servidor) */
+function obterCargoSuporteTicket(ticket, ticketConfig) {
+  if (!ticket) return ticketConfig?.support_role || null;
+  const tipo = ticket.type_id ? db.prepare('SELECT * FROM ticket_types WHERE id = ?').get(ticket.type_id) : null;
+  return tipo?.support_role || ticketConfig?.support_role || null;
+}
+
+/** Verifica se o membro faz parte da equipa de admins/suporte autorizada a reclamar tickets */
+function isEquipaAdminTicket(member, guild, ticket) {
+  if (!member) return false;
+  if (member.permissions?.has(PermissionFlagsBits.Administrator)) return true;
+  const ticketConfig = db.prepare('SELECT * FROM ticket_config WHERE guild_id = ?').get(guild.id);
+  const cargoId = obterCargoSuporteTicket(ticket, ticketConfig);
+  if (cargoId && member.roles.cache.has(cargoId)) return true;
+  return false;
+}
+
 /** Cria um ticket para o utilizador */
 async function criarTicket(guild, user, typeId, interaction) {
   const ticketConfig = db.prepare('SELECT * FROM ticket_config WHERE guild_id = ?').get(guild.id);
@@ -579,8 +606,9 @@ async function criarTicket(guild, user, typeId, interaction) {
   }
 
   // Cria o canal
+  const tipoSlug = tipo?.label ? slugifyTipoTicket(tipo.label) : 'ticket';
   const channel = await guild.channels.create({
-    name: `ticket-${String(ticketNum).padStart(4, '0')}-${user.username.toLowerCase().replace(/\s/g, '-').substring(0, 15)}`,
+    name: `${tipoSlug}-${String(ticketNum).padStart(4, '0')}-${user.username.toLowerCase().replace(/\s/g, '-').substring(0, 15)}`,
     type: ChannelType.GuildText,
     parent: categoryId,
     permissionOverwrites: permOverwrites,
@@ -616,6 +644,7 @@ async function criarTicket(guild, user, typeId, interaction) {
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('ticket_claim').setLabel('🙋 Reclamar').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('ticket_close').setLabel('🔒 Fechar').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('ticket_close_reason').setLabel('📝 Fechar com Motivo').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('ticket_adduser').setLabel('➕ Adicionar').setStyle(ButtonStyle.Secondary),
   );
   const row2 = new ActionRowBuilder().addComponents(
@@ -634,7 +663,7 @@ async function criarTicket(guild, user, typeId, interaction) {
 }
 
 /** Fecha um ticket */
-async function fecharTicket(channel, closedBy, guild) {
+async function fecharTicket(channel, closedBy, guild, reason = null) {
   const ticket = db.prepare('SELECT * FROM tickets WHERE channel_id = ?').get(channel.id);
   if (!ticket) return;
 
@@ -648,7 +677,7 @@ async function fecharTicket(channel, closedBy, guild) {
     const user = await client.users.fetch(ticket.user_id);
     const embedUser = embedPadrao(
       '🎫 Ticket Fechado',
-      `O teu ticket **#${String(ticket.ticket_number).padStart(4,'0')}** foi fechado.\nAqui está o transcript da conversa:`,
+      `O teu ticket **#${String(ticket.ticket_number).padStart(4,'0')}** foi fechado.${reason ? `\n\n📝 **Motivo do encerramento:**\n${reason}` : ''}\nAqui está o transcript da conversa:`,
       CONFIG.COR_AVISO
     );
     await user.send({ embeds: [embedUser], files: [attachment] }).catch(() => {});
@@ -666,6 +695,7 @@ async function fecharTicket(channel, closedBy, guild) {
           { name: '👤 Utilizador', value: `<@${ticket.user_id}>`, inline: true },
           { name: '🔒 Fechado por', value: `<@${closedBy}>`, inline: true },
           { name: '📅 Fechado em', value: `<t:${Math.floor(Date.now()/1000)}:F>`, inline: true },
+          ...(reason ? [{ name: '📝 Motivo', value: reason }] : []),
         )
         .setTimestamp();
       await ch.send({ embeds: [embed], files: [attachment] });
@@ -2279,6 +2309,9 @@ async function handleButton(interaction) {
   if (customId === 'ticket_claim') {
     const ticket = db.prepare('SELECT * FROM tickets WHERE channel_id = ?').get(channel.id);
     if (!ticket) return interaction.reply({ content: '❌ Este não é um canal de ticket.', ephemeral: true });
+    if (!isEquipaAdminTicket(member, guild, ticket)) {
+      return interaction.reply({ content: '❌ Apenas a equipa de administração pode reclamar este ticket.', ephemeral: true });
+    }
     if (ticket.claimed_by) return interaction.reply({ content: `❌ Este ticket já foi reclamado por <@${ticket.claimed_by}>.`, ephemeral: true });
 
     await interaction.deferReply();
@@ -2315,6 +2348,25 @@ async function handleButton(interaction) {
 
   if (customId === 'ticket_close_cancel') {
     return interaction.reply({ content: '❌ Fecho cancelado.', ephemeral: true });
+  }
+
+  // ── Fechar ticket com motivo ──
+  if (customId === 'ticket_close_reason') {
+    const ticket = db.prepare('SELECT * FROM tickets WHERE channel_id = ?').get(channel.id);
+    if (!ticket) return interaction.reply({ content: '❌ Este não é um canal de ticket.', ephemeral: true });
+
+    const modal = new ModalBuilder()
+      .setCustomId('ticket_close_reason_modal')
+      .setTitle('📝 Fechar Ticket com Motivo');
+    const input = new TextInputBuilder()
+      .setCustomId('motivo_input')
+      .setLabel('Motivo do encerramento')
+      .setPlaceholder('Escreve aqui o motivo do encerramento...')
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true)
+      .setMaxLength(1000);
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
+    return interaction.showModal(modal);
   }
 
   // ── Transcript ──
@@ -2683,6 +2735,14 @@ async function handleModal(interaction) {
     } catch (e) {
       return interaction.editReply({ content: `❌ Erro: ${e.message}` });
     }
+  }
+
+  // ── Fechar ticket com motivo ──
+  if (customId === 'ticket_close_reason_modal') {
+    const motivo = interaction.fields.getTextInputValue('motivo_input').trim();
+    await interaction.deferReply({ ephemeral: true });
+    await fecharTicket(channel, user.id, guild, motivo);
+    return interaction.editReply({ content: '✅ Ticket fechado com o motivo registado.' });
   }
 
   // ── Renomear ticket ──
