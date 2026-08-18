@@ -68,7 +68,7 @@ const CONFIG = {
   CLIENT_SECRET: process.env.CLIENT_SECRET,
   DASHBOARD_PORT: process.env.PORT || 3000,
   // URL do teu dashboard (Render, etc.)
-  REDIRECT_URI: process.env.REDIRECT_URI || 'http://localhost:3000/auth/callback',
+  REDIRECT_URI: process.env.REDIRECT_URI || 'https://agent-xt.onrender.com/auth/callback',
   SESSION_SECRET: process.env.SESSION_SECRET || 'segredo_super_secreto_muda_isto',
   // Prefixo de comandos legados (opcional)
   PREFIX: '!',
