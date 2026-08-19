@@ -1,5 +1,5 @@
 {
-  "name": "agent-xt-discord-bot",
+  "name": "nexo-xt-discord-bot",
   "version": "2.1.0",
   "description": "Bot Discord completo em Português de Portugal — Turso (libSQL) + discord.js v14 + Express.js",
   "main": "index.js",
